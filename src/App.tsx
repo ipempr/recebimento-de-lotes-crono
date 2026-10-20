@@ -63,8 +63,7 @@ import {
   FileCheck,
   RefreshCw,
   UserCheck,
-  UserX,
-  ArrowUpDown
+  UserX
 } from 'lucide-react';
 import { format, addDays, differenceInDays, isAfter, isBefore, startOfDay, parse } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -137,12 +136,6 @@ interface Batch {
   lidoEm?: Timestamp;
   conferidoPor?: string;
   conferidoEm?: Timestamp;
-  criadoEm?: Timestamp;
-  atualizadoEm?: Timestamp;
-  createdAt?: Timestamp;
-  updatedAt?: Timestamp;
-  ensaioForaDoPrazo?: boolean;
-  nonConformities?: any[];
 }
 
 interface ConfigItem {
@@ -199,60 +192,6 @@ function parseLocalTimestamp(raw: any): any {
     return LocalTimestamp.fromMillis(raw);
   }
   return LocalTimestamp.now();
-}
-
-// Safely converts any Timestamp, LocalTimestamp, Date, numeric millis, or ISO string to numeric milliseconds
-function getTimestampMillis(ts: any): number {
-  if (!ts) return 0;
-  if (typeof ts.toMillis === 'function') return ts.toMillis();
-  if (typeof ts.toDate === 'function') {
-    try {
-      const d = ts.toDate();
-      return d instanceof Date && !isNaN(d.getTime()) ? d.getTime() : 0;
-    } catch {
-      return 0;
-    }
-  }
-  if (typeof ts === 'object' && ts.seconds !== undefined) {
-    return ts.seconds * 1000 + (ts.nanoseconds ? Math.floor(ts.nanoseconds / 1000000) : 0);
-  }
-  if (ts instanceof Date) return isNaN(ts.getTime()) ? 0 : ts.getTime();
-  if (typeof ts === 'number') return ts;
-  if (typeof ts === 'string') {
-    const d = new Date(ts);
-    return isNaN(d.getTime()) ? 0 : d.getTime();
-  }
-  return 0;
-}
-
-// Compares batches so that the last received batch is always shown first
-function compareBatchesByLastReceived(a: Batch, b: Batch): number {
-  // 1. Primary: Receipt timestamp (recebidoEm) descending (newest receipt date and time first)
-  const bRecebido = getTimestampMillis(b.recebidoEm);
-  const aRecebido = getTimestampMillis(a.recebidoEm);
-
-  if (bRecebido !== aRecebido) {
-    return bRecebido - aRecebido;
-  }
-
-  // 2. Secondary: Insertion/creation timestamp (criadoEm / createdAt) descending (most recently created batch first)
-  const bCriado = getTimestampMillis((b as any).criadoEm || (b as any).createdAt);
-  const aCriado = getTimestampMillis((a as any).criadoEm || (a as any).createdAt);
-
-  if (bCriado !== aCriado) {
-    return bCriado - aCriado;
-  }
-
-  // 3. Tertiary: Period start date descending
-  const bPeriodo = getTimestampMillis(b.periodoInicial);
-  const aPeriodo = getTimestampMillis(a.periodoInicial);
-
-  if (bPeriodo !== aPeriodo) {
-    return bPeriodo - aPeriodo;
-  }
-
-  // 4. Fallback: ID string comparison
-  return (b.id || '').localeCompare(a.id || '');
 }
 
 interface AuthErrorDetails {
@@ -549,7 +488,6 @@ export default function App() {
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('open'); // Changed default to 'open'
-  const [batchSortOrder, setBatchSortOrder] = useState<string>('latest_received'); // Default to latest received batch first
   const [activeTab, setActiveTab] = useState<'dashboard' | 'config' | 'stats' | 'notifications' | 'tutorial' | 'users'>('dashboard');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingBatch, setEditingBatch] = useState<Batch | null>(null);
@@ -574,10 +512,10 @@ export default function App() {
   const [dashEndDate, setDashEndDate] = useState<string>(defaultCurrentYearEnd);
   const [visibleBatchLimit, setVisibleBatchLimit] = useState<number>(30);
 
-  // Reset pagination limit whenever filters or sort change
+  // Reset pagination limit whenever filters change
   useEffect(() => {
     setVisibleBatchLimit(30);
-  }, [searchTerm, statusFilter, batchSortOrder, dashStartDate, dashEndDate]);
+  }, [searchTerm, statusFilter, dashStartDate, dashEndDate]);
 
   // Error Handler
   const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
@@ -981,10 +919,8 @@ export default function App() {
           periodoFinal: parseLocalTimestamp(b.periodoFinal),
           recebidoEm: parseLocalTimestamp(b.recebidoEm),
           lidoEm: parseLocalTimestamp(b.lidoEm),
-          conferidoEm: parseLocalTimestamp(b.conferidoEm),
-          criadoEm: parseLocalTimestamp(b.criadoEm),
-          atualizadoEm: parseLocalTimestamp(b.atualizadoEm)
-        })).sort(compareBatchesByLastReceived);
+          conferidoEm: parseLocalTimestamp(b.conferidoEm)
+        }));
       } else {
         initialBatches = [
           {
@@ -1201,12 +1137,8 @@ export default function App() {
     testConnection();
 
     const unsubBatches = onSnapshot(
-      collection(db, 'batches'),
-      (snapshot) => {
-        const list = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Batch));
-        list.sort(compareBatchesByLastReceived);
-        setBatches(list);
-      },
+      query(collection(db, 'batches'), orderBy('recebidoEm', 'desc')),
+      (snapshot) => setBatches(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Batch))),
       (err) => handleFirestoreError(err, OperationType.LIST, 'batches')
     );
 
@@ -1434,7 +1366,7 @@ export default function App() {
     const endDateObj = dashEndDate ? startOfDay(parseLocalDate(dashEndDate)) : null;
     const now = new Date();
 
-    const filtered = batches.filter(b => {
+    return batches.filter(b => {
       const matchesSearch = !searchLower ||
         (b.pac && b.pac.toLowerCase().includes(searchLower)) ||
         (b.status && b.status.toLowerCase().includes(searchLower)) ||
@@ -1468,26 +1400,7 @@ export default function App() {
 
       return true;
     });
-
-    return filtered.sort((a, b) => {
-      if (batchSortOrder === 'oldest_received') {
-        return compareBatchesByLastReceived(b, a);
-      }
-      if (batchSortOrder === 'deadline') {
-        const aDeadline = a.periodoInicial ? addDays(a.periodoInicial.toDate(), 30).getTime() : 0;
-        const bDeadline = b.periodoInicial ? addDays(b.periodoInicial.toDate(), 30).getTime() : 0;
-        return aDeadline - bDeadline;
-      }
-      if (batchSortOrder === 'pac_asc') {
-        return (a.pac || '').localeCompare(b.pac || '');
-      }
-      if (batchSortOrder === 'pac_desc') {
-        return (b.pac || '').localeCompare(a.pac || '');
-      }
-      // Default: 'latest_received' (Ordem do último recebido)
-      return compareBatchesByLastReceived(a, b);
-    });
-  }, [batches, searchTerm, statusFilter, dashStartDate, dashEndDate, batchSortOrder]);
+  }, [batches, searchTerm, statusFilter, dashStartDate, dashEndDate]);
 
   // Statistics for Dashboard overview cards (respects the selected Dashboard period filter)
   const stats = useMemo(() => {
@@ -2102,25 +2015,24 @@ export default function App() {
             </div>
 
             {/* Dashboard Header */}
-            <div className="flex flex-col lg:flex-row gap-4 mb-8 items-center justify-between">
-              <div className="flex flex-1 flex-col sm:flex-row gap-4 w-full">
+            <div className="flex flex-col md:flex-row gap-4 mb-8 items-center justify-between">
+              <div className="flex flex-1 flex-col md:flex-row gap-4 w-full">
                 <div className="relative flex-1">
                   <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5A5A40]" size={18} />
                   <input 
                     type="text" 
                     placeholder="Buscar por PAC, Status ou Colaborador..."
-                    className="w-full pl-12 pr-4 py-3 bg-white border border-[#e5e5e0] rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 transition-all text-xs"
+                    className="w-full pl-12 pr-4 py-3 bg-white border border-[#e5e5e0] rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 transition-all"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                   />
                 </div>
-                <div className="relative w-full sm:w-48">
+                <div className="relative w-full md:w-48">
                   <Filter className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5A5A40]" size={18} />
                   <select 
-                    className="w-full pl-12 pr-4 py-3 bg-white border border-[#e5e5e0] rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 appearance-none text-xs font-semibold text-gray-700 cursor-pointer"
+                    className="w-full pl-12 pr-4 py-3 bg-white border border-[#e5e5e0] rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 appearance-none"
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
-                    title="Filtrar por status"
                   >
                     <option value="open">Em Aberto</option>
                     <option value="finished">Finalizados</option>
@@ -2128,21 +2040,6 @@ export default function App() {
                     <option value="EM DIA">Em Dia (Aberto)</option>
                     <option value="ALERTA">Alerta (Aberto)</option>
                     <option value="ATRASO">Atrasado (Aberto)</option>
-                  </select>
-                </div>
-                <div className="relative w-full sm:w-56">
-                  <ArrowUpDown className="absolute left-4 top-1/2 -translate-y-1/2 text-[#5A5A40]" size={18} />
-                  <select 
-                    className="w-full pl-12 pr-4 py-3 bg-white border border-[#e5e5e0] rounded-2xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20 appearance-none text-xs font-semibold text-gray-700 cursor-pointer"
-                    value={batchSortOrder}
-                    onChange={(e) => setBatchSortOrder(e.target.value)}
-                    title="Ordem de exibição dos lotes"
-                  >
-                    <option value="latest_received">Último Recebido (Mais recente)</option>
-                    <option value="oldest_received">Primeiro Recebido (Mais antigo)</option>
-                    <option value="deadline">Prazo (Mais Urgente)</option>
-                    <option value="pac_asc">PAC (A - Z)</option>
-                    <option value="pac_desc">PAC (Z - A)</option>
                   </select>
                 </div>
               </div>
@@ -2304,26 +2201,14 @@ export default function App() {
             onSaveLocalBatch={(localBatch: any, batchNCs: any[]) => {
               let updated;
               let batchId = '';
-              const nowTs = LocalTimestamp.now();
               if (editingBatch) {
                 batchId = editingBatch.id;
-                updated = batches.map(b => b.id === editingBatch.id ? { 
-                  ...b, 
-                  ...localBatch, 
-                  atualizadoEm: nowTs,
-                  nonConformities: batchNCs 
-                } : b);
+                updated = batches.map(b => b.id === editingBatch.id ? { ...b, ...localBatch, nonConformities: batchNCs } : b);
               } else {
                 batchId = 'local-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
-                updated = [{ 
-                  ...localBatch, 
-                  id: batchId, 
-                  criadoEm: localBatch.criadoEm || nowTs,
-                  atualizadoEm: nowTs,
-                  nonConformities: batchNCs 
-                }, ...batches];
+                updated = [{ ...localBatch, id: batchId, nonConformities: batchNCs }, ...batches];
               }
-              updated.sort(compareBatchesByLastReceived);
+              updated.sort((a, b) => b.recebidoEm.toDate().getTime() - a.recebidoEm.toDate().getTime());
               setBatches(updated);
               localStorage.setItem('lotes_batches', JSON.stringify(updated));
 
@@ -2427,26 +2312,8 @@ function ConfirmModal({ title, message, onConfirm, onCancel }: any) {
 }
 
 function BatchCard({ batch, onEdit, onDelete, canEdit = true, canDelete = true }: any) {
-  const formatDate = (ts?: any) => {
-    if (!ts) return '-';
-    try {
-      const date = ts.toDate ? ts.toDate() : new Date(ts.seconds ? ts.seconds * 1000 : ts);
-      if (isNaN(date.getTime())) return '-';
-      return format(date, "dd/MM/yyyy HH:mm", { locale: ptBR });
-    } catch {
-      return '-';
-    }
-  };
-  const formatPeriod = (ts: any) => {
-    if (!ts) return '-';
-    try {
-      const date = ts.toDate ? ts.toDate() : new Date(ts.seconds ? ts.seconds * 1000 : ts);
-      if (isNaN(date.getTime())) return '-';
-      return format(date, "dd/MM/yyyy", { locale: ptBR });
-    } catch {
-      return '-';
-    }
-  };
+  const formatDate = (ts?: Timestamp) => ts ? format(ts.toDate(), "dd/MM/yyyy HH:mm", { locale: ptBR }) : '-';
+  const formatPeriod = (ts: Timestamp) => format(ts.toDate(), "dd/MM/yyyy", { locale: ptBR });
 
   // Deadline Logic
   const isFinished = !!batch.conferidoPor && batch.conferidoPor.trim() !== '';
@@ -2784,26 +2651,7 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
               // fallback
             }
           }
-
-          // If date matches today's date, preserve current moment so newly received/updated batches have distinct chronological timestamps
-          const todayStr = format(new Date(), "yyyy-MM-dd");
-          if (dateStr === todayStr) {
-            return getTimestampNow();
-          }
-
-          // If a custom or past date was chosen, combine that date with the current time of day so multiple batches on that date preserve entry order
-          const parsed = parseLocalDate(dateStr);
-          const now = new Date();
-          const combined = new Date(
-            parsed.getFullYear(),
-            parsed.getMonth(),
-            parsed.getDate(),
-            now.getHours(),
-            now.getMinutes(),
-            now.getSeconds(),
-            now.getMilliseconds()
-          );
-          return getTimestampFromDate(combined);
+          return getTimestampFromDate(parseLocalDate(dateStr));
         }
 
         if (cleanName === (existingCollabName || '').trim() && existingTimestamp) {
@@ -2835,8 +2683,6 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
       );
 
       const { recebidoEmDate, lidoEmDate, conferidoEmDate, ...cleanFormData } = formData;
-      const nowTimestamp = getTimestampNow();
-      const finalRecebido = finalRecebidoEm || (batch?.recebidoEm || nowTimestamp);
 
       const data = {
         ...cleanFormData,
@@ -2845,11 +2691,9 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
         numEnsaios: Number(formData.numEnsaios),
         periodoInicial: getTimestampFromDate(parseLocalDate(formData.periodoInicial)),
         periodoFinal: getTimestampFromDate(parseLocalDate(formData.periodoFinal)),
-        recebidoEm: finalRecebido,
+        recebidoEm: finalRecebidoEm || (batch?.recebidoEm || getTimestampNow()),
         lidoEm: finalLidoEm,
         conferidoEm: finalConferidoEm,
-        criadoEm: batch?.criadoEm || (batch as any)?.createdAt || nowTimestamp,
-        atualizadoEm: nowTimestamp,
       };
 
       if (isLocalMode) {
@@ -2863,14 +2707,11 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
         batchId = batch.id;
         await updateDoc(doc(db, 'batches', batch.id), {
           ...data,
-          atualizadoEm: nowTimestamp,
           nonConformities: localNonConformities
         });
       } else {
         const docRef = await addDoc(collection(db, 'batches'), {
           ...data,
-          criadoEm: nowTimestamp,
-          atualizadoEm: nowTimestamp,
           nonConformities: localNonConformities
         });
         batchId = docRef.id;
@@ -3983,7 +3824,7 @@ function ConfigPanel({
           conferidoEm: parseLocalTimestamp(b.conferidoEm),
           createdAt: Timestamp.now()
         }));
-        const updated = [...finalizedLocalBatches, ...batches].sort(compareBatchesByLastReceived);
+        const updated = [...finalizedLocalBatches, ...batches];
         setBatches(updated);
         localStorage.setItem('lotes_batches', JSON.stringify(updated));
       } else {
