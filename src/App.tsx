@@ -7452,18 +7452,26 @@ function PacUnifiedAnalyticsSection({
           : `Monitoramento (${errorRatePercent}% erro)`;
       }
 
-      // KPI 5: Regularity / Days since last shipment (across all historical batches of this PAC)
+      // KPI 5: Regularity / Days since last shipment (considering only PACs with movement in the current year)
       let lastReceiptDate: Date | null = null;
+      let hasCurrentYearActivity = false;
+      const currentYear = now.getFullYear();
       allHistoricalPacBatches.forEach(b => {
         const d = toSafeDate(b.recebidoEm) || toSafeDate(b.periodoFinal) || toSafeDate(b.periodoInicial);
-        if (d && (!lastReceiptDate || d.getTime() > lastReceiptDate.getTime())) {
-          lastReceiptDate = d;
+        if (d) {
+          if (d.getFullYear() === currentYear) {
+            hasCurrentYearActivity = true;
+          }
+          if (!lastReceiptDate || d.getTime() > lastReceiptDate.getTime()) {
+            lastReceiptDate = d;
+          }
         }
       });
       const daysSinceLastDelivery = lastReceiptDate
         ? Math.max(0, differenceInDays(now, startOfDay(lastReceiptDate)))
         : null;
-      const isInactiveAlert = daysSinceLastDelivery === null || daysSinceLastDelivery > 30;
+      // Regra (Opção B): Considera apenas PACs que já tiveram movimentação no ano vigente e estão há mais de 30 dias sem enviar novo lote
+      const isInactiveAlert = hasCurrentYearActivity && daysSinceLastDelivery !== null && daysSinceLastDelivery > 30;
 
       // KPI 1: PAC Quality Score (0 to 100) & Concept (A / B / C)
       // 60 points for Technical Quality (penalizes errorRatePercent) + 40 points for Punctuality (10d+7d=17d rule)
@@ -7493,7 +7501,7 @@ function PacUnifiedAnalyticsSection({
         onTimeDeliveryRatePercent,
         avgDeliveryDays,
         topNcReason,
-         sortedReasons,
+        sortedReasons,
         unnotifiedLateCount,
         delayLimitRepetitions,
         notificationsCount,
@@ -7502,6 +7510,7 @@ function PacUnifiedAnalyticsSection({
         regulatoryRiskLabel,
         lastReceiptDate,
         daysSinceLastDelivery,
+        hasCurrentYearActivity,
         isInactiveAlert,
         qualityScore,
         qualityConcept,
@@ -7829,7 +7838,7 @@ function PacUnifiedAnalyticsSection({
               <span className="text-xs font-bold text-purple-700">PACs &gt;30d s/ envio</span>
             </div>
             <p className="text-[11px] text-purple-800/80 mt-1 font-medium">
-              Monitoramento de regularidade de remessa
+              Apenas PACs com movimentação no ano vigente
             </p>
           </div>
         </div>
