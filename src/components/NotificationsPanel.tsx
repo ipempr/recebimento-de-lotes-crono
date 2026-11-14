@@ -37,6 +37,7 @@ import { ptBR } from 'date-fns/locale';
 import clsx from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { AVAILABLE_ICONS, getIconComponent } from './NotificationTemplatesManager';
+import { evaluatePacDeliveryDeadline } from '../App';
 
 function cn(...inputs: any[]) {
   return twMerge(clsx(inputs));
@@ -178,10 +179,16 @@ export default function NotificationsPanel({
               placas: nc.placas || []
             };
           });
-    return { ...batch, nonConformities: ncs };
+    const pacDelivery = evaluatePacDeliveryDeadline(batch.periodoInicial, batch.recebidoEm, batch.ensaioForaDoPrazo);
+    return {
+      ...batch,
+      nonConformities: ncs,
+      ensaioForaDoPrazo: pacDelivery.isLate,
+      pacDeliveryInfo: pacDelivery
+    };
   });
 
-  // Filter for batches with at least one nonconformity plate or marked as delayed (ensaio fora do prazo)
+  // Filter for batches with at least one nonconformity plate or delivered after 17 days (10d + 7d Correios) / marked as delayed
   const activeNCBatches = batchesWithNCs.filter(b => 
     (b.nonConformities && b.nonConformities.length > 0) || b.ensaioForaDoPrazo
   );
@@ -588,9 +595,10 @@ export default function NotificationsPanel({
         });
       });
 
-      const isAtrasado = b.ensaioForaDoPrazo === true || b.ensaioForaDoPrazo === 'true';
+      const pacEval = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo);
+      const isAtrasado = pacEval.isLate;
       if (isAtrasado) {
-        groundsUnique.add(`Atraso na entrega de ensaios (Período: ${formatDate(b.periodoInicial)} a ${formatDate(b.periodoFinal)} | Nº de ensaios: ${b.numEnsaios || 0})`);
+        groundsUnique.add(`Atraso na entrega de ensaios além do prazo regulamentar de 17 dias (10d base + 7d Correios) — Período: ${formatDate(b.periodoInicial)} a ${formatDate(b.periodoFinal)} | Nº de ensaios: ${b.numEnsaios || 0}`);
       }
 
       const isIrregular = isAtrasado || ncs.length > 0;
@@ -602,7 +610,8 @@ export default function NotificationsPanel({
 
         let situacaoDet = '';
         if (isAtrasado) {
-          situacaoDet = 'Entrega fora do prazo (Irregularidade administrativa no conjunto do lote)';
+          const diasTxt = pacEval.elapsedDays !== null ? ` — recebido após ${pacEval.elapsedDays} dias corridos da data inicial (limite de 10 dias + 7 dias Correios = 17 dias)` : ' (acima do limite de 10 dias + 7 dias Correios)';
+          situacaoDet = `Entrega fora do prazo regulamentar${diasTxt}`;
         }
         if (ncs.length > 0) {
           const platesList: string[] = [];
@@ -1353,7 +1362,7 @@ export default function NotificationsPanel({
                                 </span>
                                 {batch.ensaioForaDoPrazo && (
                                   <span className="flex items-center gap-1 text-[9px] uppercase font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300">
-                                    <Sparkles size={10} className="text-amber-600 animate-pulse" /> ENSAIO FORA DO PRAZO
+                                    <Sparkles size={10} className="text-amber-600 animate-pulse" /> FORA DO PRAZO {batch.pacDeliveryInfo?.elapsedDays !== null && batch.pacDeliveryInfo?.elapsedDays !== undefined ? `(${batch.pacDeliveryInfo.elapsedDays}d > 17d)` : '(>17d)'}
                                   </span>
                                 )}
                               </div>

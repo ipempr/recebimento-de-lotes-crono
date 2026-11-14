@@ -28,6 +28,7 @@ import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import clsx from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { evaluatePacDeliveryDeadline } from '../App';
 
 function cn(...inputs: any[]) {
   return twMerge(clsx(inputs));
@@ -480,7 +481,8 @@ export default function NotificationTemplatesManager({
         });
       });
 
-      const isAtrasado = b.ensaioForaDoPrazo === true;
+      const pacEval = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo);
+      const isAtrasado = pacEval.isLate;
       const isIrregular = isAtrasado || ncs.length > 0;
 
       if (isIrregular) {
@@ -491,7 +493,8 @@ export default function NotificationTemplatesManager({
 
         let situacaoDet = '';
         if (isAtrasado) {
-          situacaoDet = 'Entrega fora do prazo (Irregularidade administrativa no conjunto do lote)';
+          const diasTxt = pacEval.elapsedDays !== null ? ` — recebido após ${pacEval.elapsedDays} dias corridos da data inicial (limite de 10 dias + 7 dias Correios = 17 dias)` : ' (acima do limite de 10 dias + 7 dias Correios)';
+          situacaoDet = `Entrega fora do prazo regulamentar${diasTxt}`;
         }
         if (ncs.length > 0) {
           const platesList: string[] = [];

@@ -136,6 +136,8 @@ interface Batch {
   lidoEm?: Timestamp;
   conferidoPor?: string;
   conferidoEm?: Timestamp;
+  ensaioForaDoPrazo?: boolean;
+  nonConformities?: any[];
 }
 
 interface ConfigItem {
@@ -216,6 +218,147 @@ function toSafeDate(ts: any): Date | null {
     return !isNaN(d.getTime()) ? d : null;
   }
   return null;
+}
+
+// Regra Oficial de Prazo de Entrega do PAC:
+// 10 dias a partir da Data Inicial do Lote + 7 dias de tolerância de envio (Correios) = 17 dias corridos até a Data de Recebimento sem prejuízo ao PAC.
+// Permite também ampliações ou desconsideração de prazos em períodos de recesso ou feriados configurados no sistema.
+export const PRAZO_BASE_PAC_DIAS = 10;
+export const TOLERANCIA_CORREIOS_DIAS = 7;
+export const PRAZO_MAXIMO_ENTREGA_PAC_DIAS = PRAZO_BASE_PAC_DIAS + TOLERANCIA_CORREIOS_DIAS; // 17 dias
+
+export interface DeadlineExtension {
+  id: string;
+  name: string;
+  startDate: string; // yyyy-MM-dd
+  endDate: string;   // yyyy-MM-dd
+  mode: 'add_days' | 'disregard'; // 'add_days' = Adicionar dias ao prazo | 'disregard' = Desconsiderar prazo no período
+  customDays?: number;
+  active: boolean;
+  createdAt?: string;
+}
+
+let globalDeadlineExtensions: DeadlineExtension[] = (() => {
+  try {
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('lotes_deadline_extensions') : null;
+    return saved ? JSON.parse(saved) : [];
+  } catch {
+    return [];
+  }
+})();
+
+export function setGlobalDeadlineExtensions(exts: DeadlineExtension[]) {
+  globalDeadlineExtensions = Array.isArray(exts) ? exts : [];
+}
+
+export function getGlobalDeadlineExtensions(): DeadlineExtension[] {
+  return globalDeadlineExtensions;
+}
+
+export function evaluatePacDeliveryDeadline(
+  periodoInicial: any,
+  recebidoEm: any,
+  manualFlag?: any,
+  extensionsOverride?: DeadlineExtension[]
+) {
+  const pInicialDate = toSafeDate(periodoInicial);
+  const recebidoEmDate = toSafeDate(recebidoEm);
+  const activeExtensions = (extensionsOverride || globalDeadlineExtensions).filter(
+    e => e && e.active !== false && e.startDate && e.endDate
+  );
+
+  let addedExtensionDays = 0;
+  let isDisregardedByRecess = false;
+  const appliedExtensions: Array<{
+    id: string;
+    name: string;
+    mode: 'add_days' | 'disregard';
+    daysAdded: number;
+    startDate: string;
+    endDate: string;
+  }> = [];
+
+  if (pInicialDate && activeExtensions.length > 0) {
+    const batchStart = startOfDay(pInicialDate);
+    const baseMaxEnd = addDays(batchStart, PRAZO_MAXIMO_ENTREGA_PAC_DIAS);
+    const batchCheckEnd = recebidoEmDate
+      ? (isAfter(startOfDay(recebidoEmDate), baseMaxEnd) ? startOfDay(recebidoEmDate) : baseMaxEnd)
+      : baseMaxEnd;
+
+    activeExtensions.forEach(ext => {
+      const extStart = startOfDay(parseLocalDate(ext.startDate));
+      const extEnd = startOfDay(parseLocalDate(ext.endDate));
+      if (isNaN(extStart.getTime()) || isNaN(extEnd.getTime())) return;
+
+      const overlaps = !isAfter(batchStart, extEnd) && !isBefore(batchCheckEnd, extStart);
+      if (overlaps) {
+        const intervalDays = Math.max(1, differenceInDays(extEnd, extStart) + 1);
+        const daysToAdd = ext.mode === 'add_days'
+          ? (typeof ext.customDays === 'number' && ext.customDays > 0 ? ext.customDays : intervalDays)
+          : 0;
+
+        if (ext.mode === 'disregard') {
+          isDisregardedByRecess = true;
+        } else if (ext.mode === 'add_days') {
+          addedExtensionDays += daysToAdd;
+        }
+
+        appliedExtensions.push({
+          id: ext.id,
+          name: ext.name,
+          mode: ext.mode,
+          daysAdded: daysToAdd,
+          startDate: ext.startDate,
+          endDate: ext.endDate
+        });
+      }
+    });
+  }
+
+  const effectiveMaxDays = PRAZO_MAXIMO_ENTREGA_PAC_DIAS + addedExtensionDays;
+  const baseDeadlineDate = pInicialDate ? addDays(startOfDay(pInicialDate), PRAZO_BASE_PAC_DIAS) : null;
+  const maxDeadlineDate = pInicialDate ? addDays(startOfDay(pInicialDate), effectiveMaxDays) : null;
+  const elapsedDays = (pInicialDate && recebidoEmDate)
+    ? differenceInDays(startOfDay(recebidoEmDate), startOfDay(pInicialDate))
+    : null;
+
+  const isOver17Days = !isDisregardedByRecess && elapsedDays !== null && elapsedDays > effectiveMaxDays;
+  const isWithinCorreiosTolerance = !isDisregardedByRecess && elapsedDays !== null && elapsedDays > PRAZO_BASE_PAC_DIAS && elapsedDays <= effectiveMaxDays;
+  const isExemptByCheckbox = manualFlag === false || manualFlag === 'false';
+
+  let isLate = false;
+  if (isExemptByCheckbox || isDisregardedByRecess) {
+    // Quando o checkbox do lote está desmarcado (manualFlag === false) ou há recesso isentando o período, o lote fica isento do atraso
+    isLate = false;
+  } else if (addedExtensionDays > 0 && elapsedDays !== null) {
+    isLate = elapsedDays > effectiveMaxDays;
+  } else if (elapsedDays !== null && elapsedDays <= effectiveMaxDays) {
+    // Dentro do prazo de 17d (10d + 7d Correios), não penaliza o PAC mesmo que tenha flag antiga da regra de 10d
+    isLate = false;
+  } else {
+    isLate = Boolean(manualFlag === true || manualFlag === 'true' || isOver17Days);
+  }
+
+  const daysOverLimit = isOver17Days && elapsedDays !== null
+    ? elapsedDays - effectiveMaxDays
+    : 0;
+
+  return {
+    pInicialDate,
+    recebidoEmDate,
+    baseDeadlineDate,
+    maxDeadlineDate,
+    effectiveMaxDays,
+    addedExtensionDays,
+    isDisregardedByRecess,
+    isExemptByCheckbox,
+    appliedExtensions,
+    elapsedDays,
+    isOver17Days,
+    isWithinCorreiosTolerance,
+    isLate,
+    daysOverLimit
+  };
 }
 
 interface AuthErrorDetails {
@@ -506,6 +649,35 @@ export default function App() {
       } catch (err) {
         console.error("Erro ao salvar senha no Firestore:", err);
         handleFirestoreError(err, OperationType.WRITE, 'configs/security');
+      }
+    }
+  };
+
+  const [deadlineExtensions, setDeadlineExtensions] = useState<DeadlineExtension[]>(() => {
+    try {
+      const saved = localStorage.getItem('lotes_deadline_extensions');
+      const parsed = saved ? JSON.parse(saved) : [];
+      setGlobalDeadlineExtensions(parsed);
+      return parsed;
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    setGlobalDeadlineExtensions(deadlineExtensions);
+  }, [deadlineExtensions]);
+
+  const saveDeadlineExtensions = async (newExtensions: DeadlineExtension[]) => {
+    setDeadlineExtensions(newExtensions);
+    setGlobalDeadlineExtensions(newExtensions);
+    localStorage.setItem('lotes_deadline_extensions', JSON.stringify(newExtensions));
+    if (!isLocalMode) {
+      try {
+        await setDoc(doc(db, 'configs', 'deadlines'), { items: newExtensions }, { merge: true });
+      } catch (err) {
+        console.error("Erro ao salvar ampliações de prazo no Firestore:", err);
+        handleFirestoreError(err, OperationType.WRITE, 'configs/deadlines');
       }
     }
   };
@@ -1252,6 +1424,21 @@ export default function App() {
       (err) => console.log('Firestore unsubSecurity warn:', err)
     );
 
+    const unsubDeadlines = onSnapshot(
+      doc(db, 'configs', 'deadlines'),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          if (data && Array.isArray(data.items)) {
+            setDeadlineExtensions(data.items);
+            setGlobalDeadlineExtensions(data.items);
+            localStorage.setItem('lotes_deadline_extensions', JSON.stringify(data.items));
+          }
+        }
+      },
+      (err) => console.log('Firestore unsubDeadlines warn:', err)
+    );
+
     return () => {
       unsubBatches();
       unsubPacs();
@@ -1264,6 +1451,7 @@ export default function App() {
       unsubNotifications();
       unsubLogo();
       unsubSecurity();
+      unsubDeadlines();
     };
   }, [user, isLocalMode]);
 
@@ -1399,18 +1587,20 @@ export default function App() {
       if (!matchesSearch) return false;
 
       const isFinished = !!b.conferidoPor && b.conferidoPor.trim() !== '';
-      const periodoInicialDate = toSafeDate(b.periodoInicial);
-      const deadline = periodoInicialDate ? addDays(periodoInicialDate, 30) : null;
-      const daysRemaining = deadline ? differenceInDays(deadline, now) : 0;
-      const isOverdue = !isFinished && deadline ? isAfter(now, deadline) : false;
-      const isWarning = !isFinished && !isOverdue && daysRemaining <= 10;
+      const pacDelivery = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo, deadlineExtensions);
+      const periodoInicialDate = pacDelivery.pInicialDate;
+      const deadline = pacDelivery.maxDeadlineDate; // 10 dias base + 7 dias Correios + ampliações de recesso/feriado
+      // Regra Dashboard: sinalizar alerta/atraso SOMENTE quando passar da data de tolerância (deadline) e não estiver isento pelo checkbox
+      const hasPassedToleranceDate = !pacDelivery.isExemptByCheckbox && (pacDelivery.isLate || (!isFinished && !pacDelivery.isDisregardedByRecess && deadline ? isAfter(startOfDay(now), deadline) : false));
+      const isOverdue = hasPassedToleranceDate;
+      const isWarning = hasPassedToleranceDate;
 
       // Status Filter Logic
       if (statusFilter === 'open' && isFinished) return false;
       if (statusFilter === 'finished' && !isFinished) return false;
       if (statusFilter === 'ATRASO' && !isOverdue) return false;
       if (statusFilter === 'ALERTA' && !isWarning) return false;
-      if (statusFilter === 'EM DIA' && (isOverdue || isWarning || isFinished)) return false;
+      if (statusFilter === 'EM DIA' && (hasPassedToleranceDate || isFinished)) return false;
 
       // Dashboard Period Filter
       const dateObj = isFinished 
@@ -1424,7 +1614,7 @@ export default function App() {
 
       return true;
     });
-  }, [batches, searchTerm, statusFilter, dashStartDate, dashEndDate]);
+  }, [batches, searchTerm, statusFilter, dashStartDate, dashEndDate, deadlineExtensions]);
 
   // Statistics for Dashboard overview cards (respects the selected Dashboard period filter)
   const stats = useMemo(() => {
@@ -1439,8 +1629,9 @@ export default function App() {
 
     batches.forEach(b => {
       const hasInformado = b.conferidoPor && b.conferidoPor.trim() !== '';
-      const periodoInicialDate = toSafeDate(b.periodoInicial);
-      const recebidoEmDate = toSafeDate(b.recebidoEm);
+      const pacDelivery = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo);
+      const periodoInicialDate = pacDelivery.pInicialDate;
+      const recebidoEmDate = pacDelivery.recebidoEmDate;
 
       if (hasInformado) {
         // Check if finished batch is within dashboard period filter (using periodoInicial)
@@ -1453,15 +1644,9 @@ export default function App() {
         if (match) {
           totalEnsaiosFinished += (b.numEnsaios || 0);
           
-          // On time vs Late
-          if (periodoInicialDate) {
-            const deadline = addDays(periodoInicialDate, 30);
-            const conferidoEmDate = toSafeDate(b.conferidoEm);
-            if (conferidoEmDate && isAfter(conferidoEmDate, deadline)) {
-              lateCount++;
-            } else {
-              onTimeCount++;
-            }
+          // On time vs Late (Regra PAC: 10 dias + 7 dias Correios = 17 dias da data inicial até o recebimento)
+          if (pacDelivery.isLate) {
+            lateCount++;
           } else {
             onTimeCount++;
           }
@@ -2091,6 +2276,7 @@ export default function App() {
                 <BatchCard 
                   key={batch.id} 
                   batch={batch} 
+                  deadlineExtensions={deadlineExtensions}
                   canEdit={canEditData}
                   canDelete={canDeleteBatch}
                   onEdit={() => {
@@ -2128,7 +2314,16 @@ export default function App() {
             </div>
           </>
         ) : activeTab === 'stats' ? (
-          <StatsPanel batches={batches} collaborators={collaborators} pacs={pacs} nonConformityRecords={nonConformityRecords} nonConformitiesConfigs={nonConformitiesConfigs} isLocalMode={isLocalMode} />
+          <StatsPanel
+            batches={batches}
+            collaborators={collaborators}
+            pacs={pacs}
+            nonConformityRecords={nonConformityRecords}
+            nonConformitiesConfigs={nonConformitiesConfigs}
+            generatedNotifications={generatedNotifications}
+            notificationTypes={notificationTypes}
+            isLocalMode={isLocalMode}
+          />
         ) : activeTab === 'notifications' ? (
           <NotificationsPanel 
             batches={batches}
@@ -2180,6 +2375,8 @@ export default function App() {
               saveSignatures={saveSignatures}
               configPassword={configPassword}
               saveConfigPassword={saveConfigPassword}
+              deadlineExtensions={deadlineExtensions}
+              saveDeadlineExtensions={saveDeadlineExtensions}
               isConfigUnlocked={isConfigUnlocked}
               setIsConfigUnlocked={setIsConfigUnlocked}
               setActiveTab={setActiveTab}
@@ -2335,7 +2532,7 @@ function ConfirmModal({ title, message, onConfirm, onCancel }: any) {
   );
 }
 
-function BatchCard({ batch, onEdit, onDelete, canEdit = true, canDelete = true }: any) {
+function BatchCard({ batch, deadlineExtensions, onEdit, onDelete, canEdit = true, canDelete = true }: any) {
   const formatDate = (ts?: any) => {
     const d = toSafeDate(ts);
     return d ? format(d, "dd/MM/yyyy HH:mm", { locale: ptBR }) : '-';
@@ -2345,22 +2542,29 @@ function BatchCard({ batch, onEdit, onDelete, canEdit = true, canDelete = true }
     return d ? format(d, "dd/MM/yyyy", { locale: ptBR }) : '-';
   };
 
-  // Deadline Logic
+  // Deadline Logic (Regra PAC: 10 dias da data inicial + 7 dias Correios + ampliações de recesso/feriado)
+  // No Dashboard, o sinal de ALERTA/ATRASO só aparece quando o lote passa da data de tolerância!
   const isFinished = !!batch.conferidoPor && batch.conferidoPor.trim() !== '';
-  const pInicialDate = toSafeDate(batch.periodoInicial) || new Date();
-  const deadline = addDays(pInicialDate, 30);
-  const daysRemaining = differenceInDays(deadline, new Date());
-  const isOverdue = !isFinished && isAfter(new Date(), deadline);
-  const isWarning = !isFinished && !isOverdue && daysRemaining <= 10;
+  const pacDelivery = evaluatePacDeliveryDeadline(batch.periodoInicial, batch.recebidoEm, batch.ensaioForaDoPrazo, deadlineExtensions);
+  const pInicialDate = pacDelivery.pInicialDate || new Date();
+  const deadline = pacDelivery.maxDeadlineDate || addDays(startOfDay(pInicialDate), PRAZO_MAXIMO_ENTREGA_PAC_DIAS);
+  const isPacLate = pacDelivery.isLate;
+  const hasPassedToleranceDate = !pacDelivery.isExemptByCheckbox && (isPacLate || (!isFinished && !pacDelivery.isDisregardedByRecess && isAfter(startOfDay(new Date()), deadline)));
+  const isOverdue = !isFinished && hasPassedToleranceDate;
+  const isWarning = hasPassedToleranceDate;
 
-  const dynamicStatus = isFinished ? 'FINALIZADO' : isOverdue ? 'EM ATRASO' : isWarning ? 'ALERTA' : batch.status;
+  const dynamicStatus = isFinished
+    ? 'FINALIZADO'
+    : hasPassedToleranceDate
+      ? 'ALERTA • FORA DO PRAZO'
+      : batch.status;
 
   return (
     <div className={cn(
       "bg-white rounded-[24px] p-6 border transition-all group",
       isOverdue ? "border-red-200 bg-red-50/10" : 
-      batch.ensaioForaDoPrazo ? "border-amber-300 bg-amber-50/20 shadow-md shadow-amber-500/5 md:border-l-[6px] md:border-l-amber-500" : 
-      isWarning ? "border-amber-200 bg-amber-50/10" : "border-[#e5e5e0]"
+      isPacLate ? "border-amber-300 bg-amber-50/20 shadow-md shadow-amber-500/5 md:border-l-[6px] md:border-l-amber-500" : 
+      "border-[#e5e5e0]"
     )}>
       <div className="flex flex-col lg:flex-row gap-6">
         {/* Main Info */}
@@ -2371,19 +2575,28 @@ function BatchCard({ batch, onEdit, onDelete, canEdit = true, canDelete = true }
                 <span className="text-xs font-bold uppercase tracking-wider text-[#5A5A40] opacity-60">PAC</span>
                 <h3 className="text-xl font-display font-bold tracking-tight">{batch.pac}</h3>
               </div>
-              {batch.ensaioForaDoPrazo && (
-                <span className="flex items-center gap-1.5 text-xs font-bold text-amber-800 bg-amber-100 border border-amber-300 px-2.5 py-1 rounded-lg">
-                  <AlertTriangle size={12} className="text-amber-600 animate-pulse" /> ENTREGA IRREGULAR
+              {hasPassedToleranceDate && (
+                <span
+                  className="flex items-center gap-1.5 text-xs font-bold text-amber-800 bg-amber-100 border border-amber-300 px-2.5 py-1 rounded-lg"
+                  title={`Alerta acionado somente após passar a data de tolerância (${pacDelivery.effectiveMaxDays}d da data inicial). ${pacDelivery.elapsedDays !== null ? `Recebido após ${pacDelivery.elapsedDays} dias (+${pacDelivery.daysOverLimit}d além da tolerância).` : 'Prazo limite de tolerância ultrapassado.'}`}
+                >
+                  <AlertTriangle size={12} className="text-amber-600 animate-pulse" /> ALERTA • FORA DA TOLERÂNCIA {pacDelivery.elapsedDays !== null ? `(${pacDelivery.elapsedDays}d / Limite ${pacDelivery.effectiveMaxDays}d)` : `(Limite ${format(deadline, 'dd/MM/yyyy')})`}
+                </span>
+              )}
+              {!hasPassedToleranceDate && pacDelivery.appliedExtensions && pacDelivery.appliedExtensions.length > 0 && (
+                <span
+                  className="flex items-center gap-1 text-[11px] font-bold text-teal-800 bg-teal-50 border border-teal-200 px-2.5 py-0.5 rounded-lg"
+                  title={`Prazo ampliado/abonado por período de recesso ou feriado: ${pacDelivery.appliedExtensions.map((e: any) => e.name).join(', ')}`}
+                >
+                  <Calendar size={11} className="text-teal-600" />
+                  {pacDelivery.isDisregardedByRecess
+                    ? `Prazo Desconsiderado (${pacDelivery.appliedExtensions[0].name})`
+                    : `Prazo Ampliado +${pacDelivery.addedExtensionDays}d (${pacDelivery.appliedExtensions[0].name})`}
                 </span>
               )}
               {isOverdue && (
                 <span className="flex items-center gap-1 text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-lg">
                   <AlertCircle size={12} /> ATRASADO
-                </span>
-              )}
-              {isWarning && (
-                <span className="flex items-center gap-1 text-xs font-bold text-amber-600 bg-amber-100 px-2 py-1 rounded-lg">
-                  <Clock size={12} /> ALERTA
                 </span>
               )}
             </div>
@@ -2423,6 +2636,11 @@ function BatchCard({ batch, onEdit, onDelete, canEdit = true, canDelete = true }
             <div>
               <p className="text-[10px] uppercase font-bold text-[#5A5A40] opacity-50 mb-1">Recebido em</p>
               <p className="text-sm font-medium">{formatDate(batch.recebidoEm)}</p>
+              {pacDelivery.maxDeadlineDate && (
+                <p className="text-[10px] text-[#5A5A40]/70 mt-0.5">
+                  Limite PAC (10d+7d): <span className="font-semibold">{format(pacDelivery.maxDeadlineDate, 'dd/MM/yyyy')}</span>
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -2548,20 +2766,35 @@ function SearchableSelect({ label, value, options, onChange, placeholder, requir
 
 function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, nonConformitiesConfigs, handleFirestoreError, isLocalMode, onSaveLocalBatch }: any) {
   const [localError, setLocalError] = useState<string | null>(null);
+  const initialPInicialStr = toSafeDate(batch?.periodoInicial) ? format(toSafeDate(batch.periodoInicial)!, "yyyy-MM-dd") : '';
+  const initialRecebidoStr = toSafeDate(batch?.recebidoEm) ? format(toSafeDate(batch.recebidoEm)!, "yyyy-MM-dd") : (batch ? '' : format(new Date(), "yyyy-MM-dd"));
+  const initialEval = evaluatePacDeliveryDeadline(
+    initialPInicialStr ? parseLocalDate(initialPInicialStr) : null,
+    initialRecebidoStr ? parseLocalDate(initialRecebidoStr) : null,
+    batch?.ensaioForaDoPrazo
+  );
+
   const [formData, setFormData] = useState({
     pac: batch?.pac || '',
-    periodoInicial: toSafeDate(batch?.periodoInicial) ? format(toSafeDate(batch.periodoInicial)!, "yyyy-MM-dd") : '',
+    periodoInicial: initialPInicialStr,
     periodoFinal: toSafeDate(batch?.periodoFinal) ? format(toSafeDate(batch.periodoFinal)!, "yyyy-MM-dd") : '',
     numEnsaios: batch?.numEnsaios || 0,
     status: batch?.status || 'ABERTO', // Default to ABERTO
     recebidoPor: batch?.recebidoPor || '',
-    recebidoEmDate: toSafeDate(batch?.recebidoEm) ? format(toSafeDate(batch.recebidoEm)!, "yyyy-MM-dd") : (batch ? '' : format(new Date(), "yyyy-MM-dd")),
+    recebidoEmDate: initialRecebidoStr,
     lidoPor: batch?.lidoPor || '',
     lidoEmDate: toSafeDate(batch?.lidoEm) ? format(toSafeDate(batch.lidoEm)!, "yyyy-MM-dd") : '',
     conferidoPor: batch?.conferidoPor || '',
     conferidoEmDate: toSafeDate(batch?.conferidoEm) ? format(toSafeDate(batch.conferidoEm)!, "yyyy-MM-dd") : '',
-    ensaioForaDoPrazo: batch?.ensaioForaDoPrazo || false,
+    ensaioForaDoPrazo: initialEval.isLate,
   });
+
+  // Live calculation of the 10d + 7d Correios = 17d PAC delivery deadline in BatchModal
+  const modalDeadlineEval = useMemo(() => {
+    const pDate = formData.periodoInicial ? parseLocalDate(formData.periodoInicial) : null;
+    const rDate = formData.recebidoEmDate ? parseLocalDate(formData.recebidoEmDate) : null;
+    return evaluatePacDeliveryDeadline(pDate, rDate, formData.ensaioForaDoPrazo);
+  }, [formData.periodoInicial, formData.recebidoEmDate, formData.ensaioForaDoPrazo]);
 
   // Non-conformity specific states within BatchModal
   const [activeSubView, setActiveSubView] = useState<'main' | 'addNonConformity'>('main');
@@ -2960,7 +3193,17 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
                 type="date" required
                 className="w-full p-3 bg-[#f5f5f0] border-none rounded-xl focus:ring-2 focus:ring-[#5A5A40]/20"
                 value={formData.periodoInicial}
-                onChange={e => setFormData({...formData, periodoInicial: e.target.value})}
+                onChange={e => {
+                  const newPInicial = e.target.value;
+                  const pDate = newPInicial ? parseLocalDate(newPInicial) : null;
+                  const rDate = formData.recebidoEmDate ? parseLocalDate(formData.recebidoEmDate) : null;
+                  const evalResult = evaluatePacDeliveryDeadline(pDate, rDate, undefined);
+                  setFormData(prev => ({
+                    ...prev,
+                    periodoInicial: newPInicial,
+                    ensaioForaDoPrazo: (pDate && rDate) ? evalResult.isOver17Days : prev.ensaioForaDoPrazo
+                  }));
+                }}
               />
             </div>
 
@@ -3005,17 +3248,24 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
                       </span>
                     )}
                   </div>
-                  <select 
+                    <select 
                     required
                     className="w-full p-2 bg-white border border-[#e5e5e0] rounded-lg text-sm font-medium focus:ring-2 focus:ring-[#5A5A40]/20"
                     value={formData.recebidoPor}
                     onChange={e => {
                       const val = e.target.value;
-                      setFormData(prev => ({
-                        ...prev,
-                        recebidoPor: val,
-                        recebidoEmDate: val ? (prev.recebidoEmDate || format(new Date(), "yyyy-MM-dd")) : ''
-                      }));
+                      setFormData(prev => {
+                        const nextRecDate = val ? (prev.recebidoEmDate || format(new Date(), "yyyy-MM-dd")) : '';
+                        const pDate = prev.periodoInicial ? parseLocalDate(prev.periodoInicial) : null;
+                        const rDate = nextRecDate ? parseLocalDate(nextRecDate) : null;
+                        const evalResult = evaluatePacDeliveryDeadline(pDate, rDate, undefined);
+                        return {
+                          ...prev,
+                          recebidoPor: val,
+                          recebidoEmDate: nextRecDate,
+                          ensaioForaDoPrazo: (pDate && rDate) ? evalResult.isOver17Days : prev.ensaioForaDoPrazo
+                        };
+                      });
                     }}
                   >
                     <option value="">- Selecione -</option>
@@ -3029,7 +3279,17 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
                       type="date"
                       className="w-full p-1.5 bg-white border border-[#e5e5e0] rounded-lg text-xs font-mono text-gray-700 focus:ring-1 focus:ring-[#5A5A40]/30"
                       value={formData.recebidoEmDate}
-                      onChange={e => setFormData({ ...formData, recebidoEmDate: e.target.value })}
+                      onChange={e => {
+                        const newRecDate = e.target.value;
+                        const pDate = formData.periodoInicial ? parseLocalDate(formData.periodoInicial) : null;
+                        const rDate = newRecDate ? parseLocalDate(newRecDate) : null;
+                        const evalResult = evaluatePacDeliveryDeadline(pDate, rDate, undefined);
+                        setFormData(prev => ({
+                          ...prev,
+                          recebidoEmDate: newRecDate,
+                          ensaioForaDoPrazo: (pDate && rDate) ? evalResult.isOver17Days : prev.ensaioForaDoPrazo
+                        }));
+                      }}
                     />
                   </div>
                 )}
@@ -3115,18 +3375,78 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
                 )}
               </div>
 
-              {/* Checkbox: ensaio entregue fora do prazo */}
-              <div className="col-span-full flex items-center gap-2.5 mt-2 bg-amber-50/40 p-3 rounded-xl border border-dashed border-amber-200">
-                <input 
-                  type="checkbox"
-                  id="ensaioForaDoPrazo"
-                  className="h-4 w-4 rounded border-amber-300 text-amber-605 focus:ring-amber-500/30"
-                  checked={formData.ensaioForaDoPrazo}
-                  onChange={e => setFormData({...formData, ensaioForaDoPrazo: e.target.checked})}
-                />
-                <label htmlFor="ensaioForaDoPrazo" className="text-xs font-bold text-[#5A5A40] cursor-pointer select-none">
-                  ensaio entregue fora do prazo
-                </label>
+              {/* Checkbox & Cálculo Automático: ensaio entregue fora do prazo (10d + 7d Correios + ampliações de recesso) */}
+              <div className={cn(
+                "col-span-full flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-2 p-3.5 rounded-2xl border border-dashed transition-colors",
+                formData.ensaioForaDoPrazo && !modalDeadlineEval.isDisregardedByRecess
+                  ? "bg-amber-50/70 border-amber-300"
+                  : modalDeadlineEval.isDisregardedByRecess || (modalDeadlineEval.addedExtensionDays || 0) > 0
+                    ? "bg-teal-50/60 border-teal-300"
+                    : modalDeadlineEval.isWithinCorreiosTolerance
+                      ? "bg-blue-50/50 border-blue-200"
+                      : "bg-emerald-50/40 border-emerald-200"
+              )}>
+                <div className="flex items-start sm:items-center gap-2.5">
+                  <input 
+                    type="checkbox"
+                    id="ensaioForaDoPrazo"
+                    className="h-4 w-4 mt-0.5 sm:mt-0 rounded border-amber-300 text-amber-600 focus:ring-amber-500/30 cursor-pointer"
+                    checked={formData.ensaioForaDoPrazo}
+                    onChange={e => setFormData({...formData, ensaioForaDoPrazo: e.target.checked})}
+                  />
+                  <div>
+                    <label htmlFor="ensaioForaDoPrazo" className="text-xs font-bold text-[#5A5A40] cursor-pointer select-none block">
+                      Ensaio entregue fora do prazo pelo PAC
+                    </label>
+                    <span className="text-[10px] text-gray-500 block mt-0.5">
+                      Regra: <strong>10 dias</strong> da Data Inicial + <strong>7 dias</strong> (Correios) = <strong>17 dias</strong>
+                      {(modalDeadlineEval.addedExtensionDays || 0) > 0 && (
+                        <strong className="text-teal-700"> (+{modalDeadlineEval.addedExtensionDays}d ampliação de recesso/feriado = {modalDeadlineEval.effectiveMaxDays}d)</strong>
+                      )}
+                      {modalDeadlineEval.isDisregardedByRecess && (
+                        <strong className="text-teal-700"> (Prazo desconsiderado por Recesso/Feriado ativo)</strong>
+                      )}
+                      .
+                    </span>
+                  </div>
+                </div>
+
+                {modalDeadlineEval.maxDeadlineDate && (
+                  <div className="flex flex-wrap items-center gap-2 sm:justify-end text-[11px]">
+                    <span className="px-2.5 py-1 rounded-lg bg-white border border-gray-200 text-gray-700 font-mono">
+                      Limite ({modalDeadlineEval.effectiveMaxDays}d): <strong>{format(modalDeadlineEval.maxDeadlineDate, 'dd/MM/yyyy')}</strong>
+                    </span>
+                    {modalDeadlineEval.appliedExtensions && modalDeadlineEval.appliedExtensions.length > 0 && (
+                      <span className="px-2.5 py-1 rounded-lg bg-teal-100 text-teal-800 border border-teal-200 font-bold">
+                        {modalDeadlineEval.appliedExtensions.map((e: any) => e.name).join(', ')}
+                      </span>
+                    )}
+                    {modalDeadlineEval.elapsedDays !== null && (
+                      <span className={cn(
+                        "px-2.5 py-1 rounded-lg font-bold",
+                        modalDeadlineEval.isDisregardedByRecess || (modalDeadlineEval.isExemptByCheckbox && modalDeadlineEval.isOver17Days)
+                          ? "bg-teal-100 text-teal-900 border border-teal-300"
+                          : modalDeadlineEval.isLate
+                            ? "bg-amber-100 text-amber-900 border border-amber-300"
+                            : modalDeadlineEval.isWithinCorreiosTolerance
+                              ? "bg-blue-100 text-blue-800 border border-blue-200"
+                              : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                      )}>
+                        {modalDeadlineEval.elapsedDays} dias corridos • {
+                          modalDeadlineEval.isDisregardedByRecess
+                            ? 'Isento (Recesso/Feriado)'
+                            : (modalDeadlineEval.isExemptByCheckbox && modalDeadlineEval.isOver17Days)
+                              ? 'Isento de Atraso (Checkbox Desmarcado)'
+                              : modalDeadlineEval.isLate
+                                ? `Fora do Prazo (+${modalDeadlineEval.daysOverLimit}d)`
+                                : modalDeadlineEval.isWithinCorreiosTolerance
+                                  ? 'Dentro da Tolerância (OK)'
+                                  : 'No Prazo Base (≤10d)'
+                        }
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -3236,14 +3556,146 @@ function ConfigPanel({
   saveSignatures,
   configPassword,
   saveConfigPassword,
+  deadlineExtensions = [],
+  saveDeadlineExtensions,
   isConfigUnlocked,
   setIsConfigUnlocked,
   setActiveTab
 }: any) {
-  const [activeConfig, setActiveConfig] = useState<'pacs' | 'collabs' | 'status' | 'non_conformities' | 'notification_types' | 'import' | 'branding' | 'security'>('pacs');
+  const [activeConfig, setActiveConfig] = useState<'pacs' | 'collabs' | 'status' | 'non_conformities' | 'notification_types' | 'deadlines' | 'import' | 'branding' | 'security'>('pacs');
   const [newItemName, setNewItemName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState('');
+
+  // Estados para Ampliação e Suspensão de Prazos (Recessos / Feriados)
+  const [extName, setExtName] = useState('');
+  const [extStartDate, setExtStartDate] = useState('');
+  const [extEndDate, setExtEndDate] = useState('');
+  const [extMode, setExtMode] = useState<'add_days' | 'disregard'>('add_days');
+  const [extCustomDays, setExtCustomDays] = useState<string>('');
+  const [editingExtId, setEditingExtId] = useState<string | null>(null);
+  const [extStatusMsg, setExtStatusMsg] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [isSyncingBatchDeadlines, setIsSyncingBatchDeadlines] = useState(false);
+
+  const calculatedExtIntervalDays = useMemo(() => {
+    if (!extStartDate || !extEndDate) return 0;
+    const s = startOfDay(parseLocalDate(extStartDate));
+    const e = startOfDay(parseLocalDate(extEndDate));
+    if (isNaN(s.getTime()) || isNaN(e.getTime()) || isAfter(s, e)) return 0;
+    return differenceInDays(e, s) + 1;
+  }, [extStartDate, extEndDate]);
+
+  const handleSaveDeadlineExtension = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!extName.trim()) {
+      setExtStatusMsg({ type: 'error', message: 'Informe um nome de controle para a ampliação/recesso (ex: Recesso Final de Ano).' });
+      return;
+    }
+    if (!extStartDate || !extEndDate) {
+      setExtStatusMsg({ type: 'error', message: 'Informe a data inicial e a data final do período.' });
+      return;
+    }
+    const sDate = startOfDay(parseLocalDate(extStartDate));
+    const eDate = startOfDay(parseLocalDate(extEndDate));
+    if (isAfter(sDate, eDate)) {
+      setExtStatusMsg({ type: 'error', message: 'A data inicial não pode ser posterior à data final do intervalo.' });
+      return;
+    }
+
+    const intervalDays = Math.max(1, differenceInDays(eDate, sDate) + 1);
+    const parsedCustom = extCustomDays.trim() !== '' ? Number(extCustomDays) : intervalDays;
+    const finalCustomDays = extMode === 'add_days' ? Math.max(1, isNaN(parsedCustom) ? intervalDays : parsedCustom) : intervalDays;
+
+    const currentList: DeadlineExtension[] = Array.isArray(deadlineExtensions) ? deadlineExtensions : [];
+    let updatedList: DeadlineExtension[];
+
+    if (editingExtId) {
+      updatedList = currentList.map(item =>
+        item.id === editingExtId
+          ? {
+              ...item,
+              name: extName.trim(),
+              startDate: extStartDate,
+              endDate: extEndDate,
+              mode: extMode,
+              customDays: finalCustomDays
+            }
+          : item
+      );
+    } else {
+      const newExt: DeadlineExtension = {
+        id: 'ext_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+        name: extName.trim(),
+        startDate: extStartDate,
+        endDate: extEndDate,
+        mode: extMode,
+        customDays: finalCustomDays,
+        active: true,
+        createdAt: new Date().toISOString()
+      };
+      updatedList = [newExt, ...currentList];
+    }
+
+    await saveDeadlineExtensions(updatedList);
+    setExtStatusMsg({
+      type: 'success',
+      message: editingExtId
+        ? `Ampliação "${extName.trim()}" atualizada com sucesso!`
+        : `Nova ampliação "${extName.trim()}" adicionada e aplicada aos cálculos de prazo!`
+    });
+    setEditingExtId(null);
+    setExtName('');
+    setExtStartDate('');
+    setExtEndDate('');
+    setExtMode('add_days');
+    setExtCustomDays('');
+  };
+
+  const handleSyncBatchesWithExtensions = async (extsToApply: DeadlineExtension[]) => {
+    if (!batches || batches.length === 0) return;
+    setIsSyncingBatchDeadlines(true);
+    try {
+      let changedCount = 0;
+      const toUpdate: Array<{ id: string; ensaioForaDoPrazo: boolean }> = [];
+
+      const updatedLocal = batches.map((b: Batch) => {
+        const evalRes = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo, extsToApply);
+        const shouldBeLate = evalRes.isLate;
+        if (Boolean(b.ensaioForaDoPrazo) !== shouldBeLate && b.periodoInicial && b.recebidoEm) {
+          changedCount++;
+          toUpdate.push({ id: b.id, ensaioForaDoPrazo: shouldBeLate });
+          return { ...b, ensaioForaDoPrazo: shouldBeLate };
+        }
+        return b;
+      });
+
+      if (isLocalMode) {
+        setBatches(updatedLocal);
+        localStorage.setItem('lotes_batches', JSON.stringify(updatedLocal));
+      } else if (toUpdate.length > 0) {
+        for (let i = 0; i < toUpdate.length; i += 400) {
+          const chunk = toUpdate.slice(i, i + 400);
+          const batchWrite = writeBatch(db);
+          chunk.forEach(u => {
+            batchWrite.update(doc(db, 'batches', u.id), { ensaioForaDoPrazo: u.ensaioForaDoPrazo });
+          });
+          await batchWrite.commit();
+        }
+      }
+
+      setExtStatusMsg({
+        type: 'success',
+        message: changedCount > 0
+          ? `Sincronização concluída: ${changedCount} lote(s) tiveram seu indicativo de prazo atualizado no banco conforme os períodos de recesso/feriados ativos!`
+          : 'Todos os lotes já estão sincronizados com as regras de prazo e ampliações ativas.'
+      });
+    } catch (err) {
+      console.error('Erro ao sincronizar lotes com ampliações:', err);
+      setExtStatusMsg({ type: 'error', message: 'Erro ao sincronizar lotes no banco de dados.' });
+    } finally {
+      setIsSyncingBatchDeadlines(false);
+    }
+  };
 
   // Security Tab States
   const [newPassword, setNewPassword] = useState('');
@@ -3617,18 +4069,23 @@ function ConfigPanel({
           status = 'ABERTO';
         }
 
+        const finalPInicial = pInicial || Timestamp.now();
+        const finalREm = rEm || Timestamp.now();
+        const importDeadlineEval = evaluatePacDeliveryDeadline(finalPInicial, finalREm, rawStatus === 'ATRASO' ? true : undefined);
+
         const batchData = {
           pac,
-          periodoInicial: pInicial || Timestamp.now(),
+          periodoInicial: finalPInicial,
           periodoFinal: pFinal || Timestamp.now(),
           numEnsaios,
           status,
           recebidoPor,
-          recebidoEm: rEm || Timestamp.now(),
+          recebidoEm: finalREm,
           lidoPor,
           lidoEm: lEm || (lidoPor ? Timestamp.now() : null),
           conferidoPor,
-          conferidoEm: cEm || (conferidoPor ? Timestamp.now() : null)
+          conferidoEm: cEm || (conferidoPor ? Timestamp.now() : null),
+          ensaioForaDoPrazo: importDeadlineEval.isLate
         };
 
         if (batchData.pac) {
@@ -4299,6 +4756,21 @@ function ConfigPanel({
           className={cn("px-4 py-2 rounded-full text-sm font-bold", activeConfig === 'notification_types' ? "bg-[#5A5A40] text-white" : "bg-[#f5f5f0] text-[#5A5A40]")}
         >
           Tipos de Notificações
+        </button>
+        <button 
+          onClick={() => setActiveConfig('deadlines')}
+          className={cn("px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2", activeConfig === 'deadlines' ? "bg-[#5A5A40] text-white" : "bg-[#f5f5f0] text-[#5A5A40]")}
+        >
+          <Calendar size={16} />
+          Prazos e Recessos
+          {Array.isArray(deadlineExtensions) && deadlineExtensions.filter((e: any) => e.active !== false).length > 0 && (
+            <span className={cn(
+              "text-[10px] px-1.5 py-0.5 rounded-full font-extrabold",
+              activeConfig === 'deadlines' ? "bg-white/20 text-white" : "bg-teal-600 text-white"
+            )}>
+              {deadlineExtensions.filter((e: any) => e.active !== false).length}
+            </span>
+          )}
         </button>
         <button 
           onClick={() => setActiveConfig('import')}
@@ -4996,6 +5468,405 @@ function ConfigPanel({
             </div>
           </div>
         </div>
+      ) : activeConfig === 'deadlines' ? (
+        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300 text-[#1e293b]">
+          {/* Cabeçalho Explicativo da Regra de Prazos e Recessos */}
+          <div className="bg-[#f5f5f0] p-6 rounded-2xl border border-dashed border-[#5A5A40]/20 space-y-6">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-[#e5e5e0] pb-4">
+              <div>
+                <h4 className="font-display font-bold tracking-tight text-lg text-[#5A5A40] flex items-center gap-2">
+                  <Calendar size={20} />
+                  Gestão de Prazos, Feriados e Períodos de Recesso (PAC)
+                </h4>
+                <p className="text-sm text-[#5A5A40]/80 mt-1 max-w-3xl">
+                  Em períodos de recesso, feriados prolongados ou paralisações postais, o recebimento dos lotes pode ser comprometido sem culpa do PAC. Cadastre abaixo os intervalos de datas nomeados para que os prazos sejam <strong>desconsiderados</strong> ou <strong>adicionados automaticamente</strong> ao limite de tolerância em todas as áreas do sistema.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isSyncingBatchDeadlines}
+                onClick={() => handleSyncBatchesWithExtensions(deadlineExtensions)}
+                className="px-4 py-2.5 bg-teal-700 hover:bg-teal-800 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-sm transition-all shrink-0 cursor-pointer disabled:opacity-50"
+                title="Atualiza a flag de prazo salvo nos lotes do banco de acordo com as ampliações ativas"
+              >
+                {isSyncingBatchDeadlines ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+                Sincronizar Lotes Existentes
+              </button>
+            </div>
+
+            {/* Resumo da Regra Oficial */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-white p-4 rounded-2xl border border-[#e5e5e0] flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold text-xs shrink-0">
+                  10d
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-gray-800">Prazo Base do PAC</p>
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    Até 10 dias corridos a partir da Data Inicial do lote para envio pelo PAC.
+                  </p>
+                </div>
+              </div>
+              <div className="bg-white p-4 rounded-2xl border border-[#e5e5e0] flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center font-bold text-xs shrink-0">
+                  +7d
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-gray-800">Tolerância Correios (17d)</p>
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    Mais 7 dias para trânsito postal. No Dashboard, o <strong>Alerta</strong> só é sinalizado após passar da data de tolerância.
+                  </p>
+                </div>
+              </div>
+              <div className="bg-white p-4 rounded-2xl border border-teal-200 flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-teal-50 text-teal-700 flex items-center justify-center font-bold text-xs shrink-0">
+                  +Recesso
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-teal-900">Ampliações & Feriados</p>
+                  <p className="text-[11px] text-gray-500 mt-0.5">
+                    Intervalos cadastrados abaixo somam dias à tolerância ou isentam lotes que cruzem o período.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {extStatusMsg && (
+              <div className={cn(
+                "p-4 rounded-xl flex items-center gap-3 text-xs font-medium border animate-in fade-in duration-200",
+                extStatusMsg.type === 'success'
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                  : "bg-red-50 text-red-800 border-red-200"
+              )}>
+                {extStatusMsg.type === 'success' ? <CheckCircle2 size={18} className="text-emerald-600 shrink-0" /> : <AlertCircle size={18} className="text-red-600 shrink-0" />}
+                <span className="flex-1">{extStatusMsg.message}</span>
+                <button type="button" onClick={() => setExtStatusMsg(null)} className="opacity-60 hover:opacity-100">
+                  <X size={15} />
+                </button>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+              {/* Formulário de Cadastro / Edição de Ampliação */}
+              <div className="lg:col-span-5 bg-white border border-gray-200 rounded-3xl p-6 shadow-sm space-y-4">
+                <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                  <h5 className="font-bold text-sm text-[#1e293b] flex items-center gap-2">
+                    <Plus size={16} className="text-[#5A5A40]" />
+                    {editingExtId ? 'Editar Ampliação / Recesso' : 'Nova Ampliação de Prazo'}
+                  </h5>
+                  {editingExtId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingExtId(null);
+                        setExtName('');
+                        setExtStartDate('');
+                        setExtEndDate('');
+                        setExtMode('add_days');
+                        setExtCustomDays('');
+                      }}
+                      className="text-[10px] font-bold uppercase text-red-600 hover:underline"
+                    >
+                      Cancelar Edição
+                    </button>
+                  )}
+                </div>
+
+                <form onSubmit={handleSaveDeadlineExtension} className="space-y-4">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold uppercase text-gray-500 block">
+                      Nome da Inserção / Controle *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Ex: Recesso Final de Ano 2025/2026, Carnaval 2026..."
+                      className="w-full text-xs font-semibold p-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20"
+                      value={extName}
+                      onChange={e => setExtName(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold uppercase text-gray-500 block">
+                        Data Inicial *
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        className="w-full text-xs font-semibold p-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20"
+                        value={extStartDate}
+                        onChange={e => {
+                          const nextStart = e.target.value;
+                          setExtStartDate(nextStart);
+                          if (nextStart && extEndDate) {
+                            const diff = differenceInDays(startOfDay(parseLocalDate(extEndDate)), startOfDay(parseLocalDate(nextStart))) + 1;
+                            if (diff > 0) setExtCustomDays(String(diff));
+                          }
+                        }}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold uppercase text-gray-500 block">
+                        Data Final *
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        className="w-full text-xs font-semibold p-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5A5A40]/20"
+                        value={extEndDate}
+                        onChange={e => {
+                          const nextEnd = e.target.value;
+                          setExtEndDate(nextEnd);
+                          if (extStartDate && nextEnd) {
+                            const diff = differenceInDays(startOfDay(parseLocalDate(nextEnd)), startOfDay(parseLocalDate(extStartDate))) + 1;
+                            if (diff > 0) setExtCustomDays(String(diff));
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold uppercase text-gray-500 block">
+                      Regra de Compensação no Prazo *
+                    </label>
+                    <div className="grid grid-cols-1 gap-2">
+                      <label className={cn(
+                        "flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-all text-xs",
+                        extMode === 'add_days'
+                          ? "bg-teal-50/70 border-teal-500 text-teal-950 font-semibold"
+                          : "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100"
+                      )}>
+                        <input
+                          type="radio"
+                          name="extMode"
+                          className="mt-0.5"
+                          checked={extMode === 'add_days'}
+                          onChange={() => setExtMode('add_days')}
+                        />
+                        <div>
+                          <span className="block font-bold">Adicionar dias ao prazo de tolerância</span>
+                          <span className="text-[10px] text-gray-500 font-normal">
+                            Soma os dias deste período ao limite de 17 dias dos lotes que cruzarem o intervalo.
+                          </span>
+                        </div>
+                      </label>
+
+                      <label className={cn(
+                        "flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer transition-all text-xs",
+                        extMode === 'disregard'
+                          ? "bg-teal-50/70 border-teal-500 text-teal-950 font-semibold"
+                          : "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100"
+                      )}>
+                        <input
+                          type="radio"
+                          name="extMode"
+                          className="mt-0.5"
+                          checked={extMode === 'disregard'}
+                          onChange={() => setExtMode('disregard')}
+                        />
+                        <div>
+                          <span className="block font-bold">Desconsiderar prazo no intervalo (Isentar Atraso)</span>
+                          <span className="text-[10px] text-gray-500 font-normal">
+                            Desconsidera o indicativo de atraso para qualquer lote cujo período ou envio ocorra neste intervalo.
+                          </span>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+
+                  {extMode === 'add_days' && (
+                    <div className="space-y-1 bg-teal-50/40 p-3 rounded-xl border border-teal-200/70">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[10px] font-bold uppercase text-teal-900">
+                          Quantidade de Dias a Adicionar
+                        </label>
+                        {calculatedExtIntervalDays > 0 && (
+                          <span className="text-[10px] font-mono text-teal-700">
+                            Intervalo selecionado: {calculatedExtIntervalDays} dia(s)
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        max={365}
+                        placeholder={calculatedExtIntervalDays > 0 ? String(calculatedExtIntervalDays) : 'Ex: 10'}
+                        className="w-full text-xs font-bold p-2 bg-white border border-teal-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500/20"
+                        value={extCustomDays}
+                        onChange={e => setExtCustomDays(e.target.value)}
+                      />
+                      <p className="text-[10px] text-teal-800/80">
+                        Novo limite para lotes afetados: <strong>{17 + (Number(extCustomDays) || calculatedExtIntervalDays || 0)} dias corridos</strong> (10d PAC + 7d Correios + {Number(extCustomDays) || calculatedExtIntervalDays || 0}d ampliação).
+                      </p>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="w-full bg-[#5A5A40] hover:bg-[#4a4a30] text-white font-bold text-xs py-3 px-4 rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    {editingExtId ? <Check size={15} /> : <Plus size={15} />}
+                    {editingExtId ? 'Salvar Alterações na Ampliação' : 'Adicionar Ampliação de Prazo'}
+                  </button>
+                </form>
+              </div>
+
+              {/* Lista de Ampliações Cadastradas */}
+              <div className="lg:col-span-7 bg-white border border-gray-200 rounded-3xl p-6 shadow-sm min-h-[420px] flex flex-col">
+                <div className="flex items-center justify-between border-b border-gray-100 pb-3 mb-4">
+                  <div>
+                    <h5 className="font-bold text-sm text-[#1e293b]">
+                      Ampliações e Períodos Cadastrados ({Array.isArray(deadlineExtensions) ? deadlineExtensions.length : 0})
+                    </h5>
+                    <p className="text-[11px] text-gray-500">
+                      Controle nominal de todos os recessos, feriados e ampliações aplicados aos lotes.
+                    </p>
+                  </div>
+                </div>
+
+                {Array.isArray(deadlineExtensions) && deadlineExtensions.length > 0 ? (
+                  <div className="space-y-3 overflow-y-auto max-h-[520px] pr-1">
+                    {deadlineExtensions.map((ext: DeadlineExtension) => {
+                      const sDate = startOfDay(parseLocalDate(ext.startDate));
+                      const eDate = startOfDay(parseLocalDate(ext.endDate));
+                      const intervalDays = (!isNaN(sDate.getTime()) && !isNaN(eDate.getTime()))
+                        ? Math.max(1, differenceInDays(eDate, sDate) + 1)
+                        : 1;
+                      const effectiveDaysAdded = ext.mode === 'add_days'
+                        ? (ext.customDays && ext.customDays > 0 ? ext.customDays : intervalDays)
+                        : 0;
+
+                      // Count how many batches overlap this extension
+                      const affectedBatchesCount = (batches || []).filter((b: Batch) => {
+                        const pDate = toSafeDate(b.periodoInicial);
+                        if (!pDate || isNaN(sDate.getTime()) || isNaN(eDate.getTime())) return false;
+                        const bStart = startOfDay(pDate);
+                        const rDate = toSafeDate(b.recebidoEm);
+                        const baseMax = addDays(bStart, PRAZO_MAXIMO_ENTREGA_PAC_DIAS);
+                        const bEnd = rDate ? (isAfter(startOfDay(rDate), baseMax) ? startOfDay(rDate) : baseMax) : baseMax;
+                        return !isAfter(bStart, eDate) && !isBefore(bEnd, sDate);
+                      }).length;
+
+                      return (
+                        <div
+                          key={ext.id}
+                          className={cn(
+                            "p-4 rounded-2xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-4",
+                            ext.active !== false
+                              ? "bg-teal-50/30 border-teal-200/80 hover:border-teal-300"
+                              : "bg-gray-50 border-gray-200 opacity-60"
+                          )}
+                        >
+                          <div className="space-y-1.5">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-display font-bold text-sm text-gray-900">
+                                {ext.name}
+                              </span>
+                              <span className={cn(
+                                "text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full border",
+                                ext.active !== false
+                                  ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+                                  : "bg-gray-200 text-gray-600 border-gray-300"
+                              )}>
+                                {ext.active !== false ? 'Ativo' : 'Inativo'}
+                              </span>
+                              <span className={cn(
+                                "text-[10px] font-bold px-2 py-0.5 rounded-lg border",
+                                ext.mode === 'disregard'
+                                  ? "bg-purple-50 text-purple-800 border-purple-200"
+                                  : "bg-teal-100 text-teal-900 border-teal-200"
+                              )}>
+                                {ext.mode === 'disregard'
+                                  ? 'Prazo Desconsiderado (Isento)'
+                                  : `+${effectiveDaysAdded} dia(s) no prazo (Limite ${17 + effectiveDaysAdded}d)`}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-3 text-xs text-gray-600 font-mono">
+                              <span className="flex items-center gap-1">
+                                <Calendar size={12} className="text-[#5A5A40]" />
+                                {ext.startDate ? format(parseLocalDate(ext.startDate), 'dd/MM/yyyy') : '-'} até {ext.endDate ? format(parseLocalDate(ext.endDate), 'dd/MM/yyyy') : '-'}
+                              </span>
+                              <span className="text-[11px] text-gray-500 font-sans">
+                                • {affectedBatchesCount} lote(s) abrangido(s) no período
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const updated = deadlineExtensions.map((item: DeadlineExtension) =>
+                                  item.id === ext.id ? { ...item, active: item.active === false ? true : false } : item
+                                );
+                                await saveDeadlineExtensions(updated);
+                              }}
+                              className={cn(
+                                "px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer",
+                                ext.active !== false
+                                  ? "bg-white text-gray-700 border-gray-200 hover:bg-gray-100"
+                                  : "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
+                              )}
+                              title={ext.active !== false ? 'Pausar / Desativar esta ampliação' : 'Reativar esta ampliação'}
+                            >
+                              {ext.active !== false ? 'Desativar' : 'Ativar'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingExtId(ext.id);
+                                setExtName(ext.name);
+                                setExtStartDate(ext.startDate);
+                                setExtEndDate(ext.endDate);
+                                setExtMode(ext.mode);
+                                setExtCustomDays(ext.customDays ? String(ext.customDays) : '');
+                              }}
+                              className="p-2 text-[#5A5A40] hover:bg-white rounded-xl border border-transparent hover:border-gray-200 transition-all cursor-pointer"
+                              title="Editar Ampliação"
+                            >
+                              <Edit3 size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const updated = deadlineExtensions.filter((item: DeadlineExtension) => item.id !== ext.id);
+                                await saveDeadlineExtensions(updated);
+                                if (editingExtId === ext.id) {
+                                  setEditingExtId(null);
+                                  setExtName('');
+                                  setExtStartDate('');
+                                  setExtEndDate('');
+                                }
+                              }}
+                              className="p-2 text-red-500 hover:bg-red-50 rounded-xl transition-all cursor-pointer"
+                              title="Excluir Ampliação"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center text-center py-14 text-gray-400">
+                    <div className="w-12 h-12 rounded-2xl bg-gray-100 flex items-center justify-center text-gray-400 mb-3">
+                      <Calendar size={22} />
+                    </div>
+                    <p className="text-xs font-bold text-gray-600">Nenhum período de recesso ou ampliação cadastrado</p>
+                    <p className="text-[11px] text-gray-400 max-w-xs mt-1">
+                      Utilize o formulário ao lado para registrar recessos de fim de ano, feriados ou ampliações de prazo sempre que necessário.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       ) : (
         <>
           <div className="mb-6">
@@ -5435,6 +6306,8 @@ function StatsPanel({
   pacs,
   nonConformityRecords,
   nonConformitiesConfigs,
+  generatedNotifications = [],
+  notificationTypes = [],
   isLocalMode
 }: {
   batches: any[];
@@ -5442,6 +6315,8 @@ function StatsPanel({
   pacs: any[];
   nonConformityRecords?: any[];
   nonConformitiesConfigs?: any[];
+  generatedNotifications?: any[];
+  notificationTypes?: any[];
   isLocalMode?: boolean;
 }) {
   // Default filter dates: last 30 days
@@ -5674,11 +6549,9 @@ function StatsPanel({
             productivity[cName].leadTimeCount += 1;
           }
 
-          // Delivery Quality (tracked for batches informed/concluded in this period)
-          const periodoInicialDate = toSafeDate(b.periodoInicial);
-          const deadline = periodoInicialDate ? addDays(periodoInicialDate, 30) : null;
-          const isLate = (deadline && cDate && isAfter(cDate, deadline)) || b.ensaioForaDoPrazo;
-          if (isLate) {
+          // Delivery Quality (tracked for batches informed/concluded in this period using 10d + 7d Correios = 17d rule)
+          const pacDelivery = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo);
+          if (pacDelivery.isLate) {
             lateCount++;
           } else {
             onTimeCount++;
@@ -6302,7 +7175,7 @@ function StatsPanel({
                     <div>
                       <span className="text-xs font-bold text-emerald-950 block">Concluídos / Informados</span>
                       <span className="text-[10px] text-emerald-800/80">
-                        {computedStats.totalFinished > 0 ? Math.round((computedStats.onTimeCount / computedStats.totalFinished) * 100) : 100}% entregues dentro do prazo (30d)
+                        {computedStats.totalFinished > 0 ? Math.round((computedStats.onTimeCount / computedStats.totalFinished) * 100) : 100}% entregues no prazo PAC (10d + 7d Correios = 17d)
                       </span>
                     </div>
                   </div>
@@ -6322,8 +7195,8 @@ function StatsPanel({
                   />
                 </div>
                 <div className="flex justify-between text-[10px] font-bold pt-0.5">
-                  <span className="text-emerald-800">✓ No Prazo: {computedStats.onTimeCount}</span>
-                  <span className="text-red-700">⚠ Com Atraso: {computedStats.lateCount}</span>
+                  <span className="text-emerald-800">✓ No Prazo (≤17d): {computedStats.onTimeCount}</span>
+                  <span className="text-red-700">⚠ Fora do Prazo (&gt;17d): {computedStats.lateCount}</span>
                 </div>
               </div>
             </div>
@@ -6372,6 +7245,9 @@ function StatsPanel({
         batches={batches}
         pacs={pacs}
         nonConformityRecords={nonConformityRecords}
+        nonConformitiesConfigs={nonConformitiesConfigs}
+        generatedNotifications={generatedNotifications}
+        notificationTypes={notificationTypes}
         statsStartDate={statsStartDate}
         statsEndDate={statsEndDate}
         defaultStatsStart={defaultStatsStart}
@@ -6385,6 +7261,9 @@ interface PacUnifiedAnalyticsSectionProps {
   batches: any[];
   pacs: any[];
   nonConformityRecords?: any[];
+  nonConformitiesConfigs?: any[];
+  generatedNotifications?: any[];
+  notificationTypes?: any[];
   statsStartDate: string;
   statsEndDate: string;
   defaultStatsStart: string;
@@ -6395,20 +7274,23 @@ function PacUnifiedAnalyticsSection({
   batches,
   pacs,
   nonConformityRecords = [],
+  nonConformitiesConfigs = [],
+  generatedNotifications = [],
+  notificationTypes = [],
   statsStartDate,
   statsEndDate,
   defaultStatsStart,
   defaultStatsEnd
 }: PacUnifiedAnalyticsSectionProps) {
   const [viewMode, setViewMode] = useState<'ranking' | 'evolution'>('ranking');
-  const [complianceTab, setComplianceTab] = useState<'all' | 'compliant' | 'nonCompliant'>('all');
-  const [pacSortOrder, setPacSortOrder] = useState<'ensaios_desc' | 'nc_desc' | 'alphabetical'>('ensaios_desc');
+  const [complianceTab, setComplianceTab] = useState<'all' | 'compliant' | 'nonCompliant' | 'highRisk' | 'inactive'>('all');
+  const [pacSortOrder, setPacSortOrder] = useState<'score_asc' | 'score_desc' | 'ensaios_desc' | 'nc_desc' | 'leadtime_desc' | 'alphabetical'>('ensaios_desc');
   const [searchTerm, setSearchTerm] = useState('');
   const [copied, setCopied] = useState(false);
   const [selectedPacForModal, setSelectedPacForModal] = useState<any | null>(null);
   const [selectedPacEvolution, setSelectedPacEvolution] = useState<string>('all');
 
-  // Compute complete metrics per PAC in the selected period
+  // Compute complete KPIs per PAC in the selected period + historical regularity & regulatory risk
   const pacMetrics = useMemo(() => {
     const configPacNames = (pacs || []).map((p: any) => p.name || p.id).filter(Boolean);
     const batchPacNames = (batches || []).map((b: any) => b.pac).filter(Boolean);
@@ -6416,6 +7298,7 @@ function PacUnifiedAnalyticsSection({
 
     const startDate = statsStartDate ? startOfDay(parseLocalDate(statsStartDate)) : null;
     const endDate = statsEndDate ? startOfDay(parseLocalDate(statsEndDate)) : null;
+    const now = startOfDay(new Date());
 
     // Build NC Map by batch ID once
     const ncMapByBatch = new Map<string, any[]>();
@@ -6424,6 +7307,28 @@ function PacUnifiedAnalyticsSection({
         const list = ncMapByBatch.get(nc.recebimento_lote_id) || [];
         list.push(nc);
         ncMapByBatch.set(nc.recebimento_lote_id, list);
+      }
+    });
+
+    // Build set of already notified batch IDs
+    const notifiedBatchIds = new Set<string>();
+    (generatedNotifications || []).forEach((n: any) => {
+      (n.batches || []).forEach((nb: any) => {
+        if (nb?.id) notifiedBatchIds.add(nb.id);
+      });
+    });
+
+    // Determine delay repetition threshold from configured notification rules (default 4)
+    let delayLimitRepetitions = 4;
+    let errorRateThreshold = 10;
+    (notificationTypes || []).forEach((nt: any) => {
+      if (nt?.rule?.active) {
+        if (nt.rule.regraAtraso_ativa && typeof nt.rule.regraAtraso_limiteRepeticoes === 'number' && nt.rule.regraAtraso_limiteRepeticoes > 0) {
+          delayLimitRepetitions = nt.rule.regraAtraso_limiteRepeticoes;
+        }
+        if (nt.rule.criterioA_ativo && typeof nt.rule.criterioA_limite === 'number' && nt.rule.criterioA_limite > 0) {
+          errorRateThreshold = nt.rule.criterioA_limite;
+        }
       }
     });
 
@@ -6438,6 +7343,7 @@ function PacUnifiedAnalyticsSection({
 
     const results = allPacNames.map(pacName => {
       const pacBatches = periodBatches.filter(b => b.pac === pacName);
+      const allHistoricalPacBatches = batches.filter(b => b.pac === pacName);
       const totalBatches = pacBatches.length;
       let totalEnsaiosDelivered = 0;
       let totalEnsaios = 0;
@@ -6445,6 +7351,14 @@ function PacUnifiedAnalyticsSection({
       let ncCount = 0;
       let ncPlatesCount = 0;
       let delayCount = 0;
+      let baseOnTimeCount = 0; // <= 10 days
+      let correiosToleranceCount = 0; // 11 to 17 days
+      let cleanBatchesCount = 0; // 0 NCs and 0 delay
+
+      let deliveryDaysSum = 0;
+      let deliveryDaysCount = 0;
+
+      const ncReasonMap: Record<string, { name: string; plates: number; occurrences: number }> = {};
 
       pacBatches.forEach(b => {
         const numEns = Number(b.numEnsaios) || 0;
@@ -6459,28 +7373,109 @@ function PacUnifiedAnalyticsSection({
         const ncListFirestore = ncMapByBatch.get(b.id) || [];
         const batchNCs = ncListLocal.length > 0 ? ncListLocal : ncListFirestore;
 
+        let hasBatchNc = false;
         if (batchNCs.length > 0) {
+          hasBatchNc = true;
           ncCount += batchNCs.length;
           batchNCs.forEach((ncItem: any) => {
-            ncPlatesCount += Array.isArray(ncItem.placas) && ncItem.placas.length > 0 ? ncItem.placas.length : 1;
+            const platesLen = Array.isArray(ncItem.placas) && ncItem.placas.length > 0 ? ncItem.placas.length : 1;
+            ncPlatesCount += platesLen;
+            const cfg = (nonConformitiesConfigs || []).find((c: any) => c.id === ncItem.nao_conformidade_id);
+            const reasonName = cfg?.name || ncItem.nao_conformidade_name || ncItem.nao_conformidade_id || 'Outro Enquadramento';
+            if (!ncReasonMap[reasonName]) {
+              ncReasonMap[reasonName] = { name: reasonName, plates: 0, occurrences: 0 };
+            }
+            ncReasonMap[reasonName].plates += platesLen;
+            ncReasonMap[reasonName].occurrences += 1;
           });
         }
 
-        // Check Delays
-        const pInicialDate = toSafeDate(b.periodoInicial);
-        const cDate = toSafeDate(b.conferidoEm);
-        const deadline = pInicialDate ? addDays(pInicialDate, 30) : null;
-        const isFinishedLate = isFinished && cDate && deadline && isAfter(cDate, deadline);
-        const isOpenLate = !isFinished && deadline && isAfter(new Date(), deadline);
-        const isMarkedLate = b.ensaioForaDoPrazo === true || b.status === 'ATRASO';
+        // Check PAC Delivery Deadline (Rule: 10d from periodoInicial + 7d Correios tolerance = 17 days to recebidoEm)
+        const pacDelivery = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo);
+        if (pacDelivery.elapsedDays !== null && pacDelivery.elapsedDays >= 0) {
+          deliveryDaysSum += pacDelivery.elapsedDays;
+          deliveryDaysCount += 1;
+        }
 
-        if (isFinishedLate || isOpenLate || isMarkedLate) {
+        if (pacDelivery.isLate) {
           delayCount++;
+        } else if (pacDelivery.isWithinCorreiosTolerance) {
+          correiosToleranceCount++;
+        } else {
+          baseOnTimeCount++;
+        }
+
+        if (!hasBatchNc && !pacDelivery.isLate) {
+          cleanBatchesCount++;
         }
       });
 
       const isFullyCompliant = ncCount === 0 && delayCount === 0;
       const errorRatePercent = totalEnsaios > 0 ? Number(((ncPlatesCount / totalEnsaios) * 100).toFixed(2)) : 0;
+      const cleanBatchesRatePercent = totalBatches > 0 ? Math.round((cleanBatchesCount / totalBatches) * 100) : 100;
+      const onTimeDeliveryRatePercent = totalBatches > 0 ? Math.round(((totalBatches - delayCount) / totalBatches) * 100) : 100;
+      const avgDeliveryDays = deliveryDaysCount > 0 ? Number((deliveryDaysSum / deliveryDaysCount).toFixed(1)) : null;
+
+      // Top #1 Non-conformity reason for this PAC in the period
+      const sortedReasons = Object.values(ncReasonMap).sort((a, b) => b.plates - a.plates || b.occurrences - a.occurrences);
+      const topNcReason = sortedReasons.length > 0 ? sortedReasons[0] : null;
+
+      // KPI 4: Regulatory Risk / Notification Proximity (evaluated on unnotified batches + period metrics)
+      const unnotifiedLateBatches = allHistoricalPacBatches.filter(b => {
+        if (notifiedBatchIds.has(b.id)) return false;
+        const evalRes = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo);
+        return evalRes.isLate;
+      });
+      const unnotifiedLateCount = unnotifiedLateBatches.length;
+
+      const pacNotifications = (generatedNotifications || []).filter(
+        (n: any) => n.pac_name === pacName || n.pac_id === pacName
+      );
+      const notificationsCount = pacNotifications.length;
+      const defensesCount = pacNotifications.filter((n: any) => n.status === 'DEFESA_APRESENTADA' || n.defenseText).length;
+
+      // Risk level:
+      // HIGH: unnotifiedLateCount >= delayLimitRepetitions OR errorRatePercent >= errorRateThreshold
+      // MEDIUM: unnotifiedLateCount === delayLimitRepetitions - 1 OR (unnotifiedLateCount >= 2) OR errorRatePercent >= (errorRateThreshold * 0.6)
+      // LOW: otherwise
+      let regulatoryRiskLevel: 'ALTO' | 'MODERADO' | 'BAIXO' = 'BAIXO';
+      let regulatoryRiskLabel = 'Regular';
+      if (unnotifiedLateCount >= delayLimitRepetitions || errorRatePercent >= errorRateThreshold) {
+        regulatoryRiskLevel = 'ALTO';
+        regulatoryRiskLabel = unnotifiedLateCount >= delayLimitRepetitions
+          ? `Gatilho Atraso (${unnotifiedLateCount}/${delayLimitRepetitions})`
+          : `Erro ≥ ${errorRateThreshold}% (${errorRatePercent}%)`;
+      } else if (unnotifiedLateCount >= Math.max(2, delayLimitRepetitions - 1) || errorRatePercent >= errorRateThreshold * 0.5 || delayCount > 0 || ncPlatesCount > 0) {
+        regulatoryRiskLevel = 'MODERADO';
+        regulatoryRiskLabel = unnotifiedLateCount > 0
+          ? `${unnotifiedLateCount}/${delayLimitRepetitions} Atrasos Acum.`
+          : `Monitoramento (${errorRatePercent}% erro)`;
+      }
+
+      // KPI 5: Regularity / Days since last shipment (across all historical batches of this PAC)
+      let lastReceiptDate: Date | null = null;
+      allHistoricalPacBatches.forEach(b => {
+        const d = toSafeDate(b.recebidoEm) || toSafeDate(b.periodoFinal) || toSafeDate(b.periodoInicial);
+        if (d && (!lastReceiptDate || d.getTime() > lastReceiptDate.getTime())) {
+          lastReceiptDate = d;
+        }
+      });
+      const daysSinceLastDelivery = lastReceiptDate
+        ? Math.max(0, differenceInDays(now, startOfDay(lastReceiptDate)))
+        : null;
+      const isInactiveAlert = daysSinceLastDelivery === null || daysSinceLastDelivery > 30;
+
+      // KPI 1: PAC Quality Score (0 to 100) & Concept (A / B / C)
+      // 60 points for Technical Quality (penalizes errorRatePercent) + 40 points for Punctuality (10d+7d=17d rule)
+      const technicalScore = Math.max(0, 60 - (errorRatePercent * 6));
+      const punctualityScore = (onTimeDeliveryRatePercent / 100) * 40;
+      const qualityScore = totalBatches > 0 ? Math.round(Math.min(100, Math.max(0, technicalScore + punctualityScore))) : 100;
+      const qualityConcept: 'A' | 'B' | 'C' =
+        qualityScore >= 90 && regulatoryRiskLevel !== 'ALTO'
+          ? 'A'
+          : qualityScore >= 75 && regulatoryRiskLevel !== 'ALTO'
+            ? 'B'
+            : 'C';
 
       return {
         pac: pacName,
@@ -6491,6 +7486,25 @@ function PacUnifiedAnalyticsSection({
         ncPlatesCount,
         errorRatePercent,
         delayCount,
+        baseOnTimeCount,
+        correiosToleranceCount,
+        cleanBatchesCount,
+        cleanBatchesRatePercent,
+        onTimeDeliveryRatePercent,
+        avgDeliveryDays,
+        topNcReason,
+         sortedReasons,
+        unnotifiedLateCount,
+        delayLimitRepetitions,
+        notificationsCount,
+        defensesCount,
+        regulatoryRiskLevel,
+        regulatoryRiskLabel,
+        lastReceiptDate,
+        daysSinceLastDelivery,
+        isInactiveAlert,
+        qualityScore,
+        qualityConcept,
         isFullyCompliant,
         pacBatches
       };
@@ -6499,6 +7513,21 @@ function PacUnifiedAnalyticsSection({
     const activePacs = results.filter(r => r.totalBatches > 0);
     const compliantPacs = activePacs.filter(r => r.isFullyCompliant);
     const nonCompliantPacs = activePacs.filter(r => !r.isFullyCompliant);
+    const highRiskPacs = activePacs.filter(r => r.regulatoryRiskLevel === 'ALTO' || r.qualityConcept === 'C');
+    const inactivePacs = results.filter(r => r.isInactiveAlert);
+
+    // Average score & average lead time across active PACs
+    const avgQualityScore = activePacs.length > 0
+      ? Math.round(activePacs.reduce((acc, p) => acc + p.qualityScore, 0) / activePacs.length)
+      : 100;
+
+    const pacsWithLeadTime = activePacs.filter(p => p.avgDeliveryDays !== null);
+    const globalAvgDeliveryDays = pacsWithLeadTime.length > 0
+      ? Number((pacsWithLeadTime.reduce((acc, p) => acc + (p.avgDeliveryDays || 0), 0) / pacsWithLeadTime.length).toFixed(1))
+      : 0;
+
+    const totalCorreiosToleranceBatches = activePacs.reduce((acc, p) => acc + p.correiosToleranceCount, 0);
+    const totalLateBatches = activePacs.reduce((acc, p) => acc + p.delayCount, 0);
 
     return {
       allPacNames,
@@ -6507,14 +7536,22 @@ function PacUnifiedAnalyticsSection({
       activePacs,
       compliantPacs,
       nonCompliantPacs,
+      highRiskPacs,
+      inactivePacs,
       totalActivePacsCount: activePacs.length,
       compliantPacsCount: compliantPacs.length,
       nonCompliantPacsCount: nonCompliantPacs.length,
+      highRiskPacsCount: highRiskPacs.length,
+      inactivePacsCount: inactivePacs.length,
       compliancePercentage: activePacs.length > 0 ? Math.round((compliantPacs.length / activePacs.length) * 100) : 100,
+      avgQualityScore,
+      globalAvgDeliveryDays,
+      totalCorreiosToleranceBatches,
+      totalLateBatches,
       totalEnsaiosPeriod: activePacs.reduce((acc, p) => acc + p.totalEnsaios, 0),
       totalEnsaiosCompliant: compliantPacs.reduce((acc, p) => acc + p.totalEnsaios, 0)
     };
-  }, [pacs, batches, nonConformityRecords, statsStartDate, statsEndDate]);
+  }, [pacs, batches, nonConformityRecords, nonConformitiesConfigs, generatedNotifications, notificationTypes, statsStartDate, statsEndDate]);
 
   // Filter and sort list for the main table
   const displayedPacs = useMemo(() => {
@@ -6523,6 +7560,10 @@ function PacUnifiedAnalyticsSection({
       list = [...pacMetrics.compliantPacs];
     } else if (complianceTab === 'nonCompliant') {
       list = [...pacMetrics.nonCompliantPacs];
+    } else if (complianceTab === 'highRisk') {
+      list = [...pacMetrics.highRiskPacs];
+    } else if (complianceTab === 'inactive') {
+      list = [...pacMetrics.inactivePacs];
     }
 
     if (searchTerm.trim()) {
@@ -6534,6 +7575,12 @@ function PacUnifiedAnalyticsSection({
       list.sort((a, b) => b.totalEnsaios - a.totalEnsaios || a.pac.localeCompare(b.pac));
     } else if (pacSortOrder === 'nc_desc') {
       list.sort((a, b) => b.ncPlatesCount - a.ncPlatesCount || b.delayCount - a.delayCount || b.totalEnsaios - a.totalEnsaios);
+    } else if (pacSortOrder === 'score_asc') {
+      list.sort((a, b) => a.qualityScore - b.qualityScore || b.ncPlatesCount - a.ncPlatesCount || b.delayCount - a.delayCount);
+    } else if (pacSortOrder === 'score_desc') {
+      list.sort((a, b) => b.qualityScore - a.qualityScore || b.totalEnsaios - a.totalEnsaios);
+    } else if (pacSortOrder === 'leadtime_desc') {
+      list.sort((a, b) => (b.avgDeliveryDays ?? -1) - (a.avgDeliveryDays ?? -1) || b.delayCount - a.delayCount);
     } else {
       list.sort((a, b) => a.pac.localeCompare(b.pac));
     }
@@ -6585,23 +7632,34 @@ function PacUnifiedAnalyticsSection({
   const handleExportExcel = () => {
     const exportData = displayedPacs.map(item => ({
       'PAC': item.pac,
+      'Score de Qualidade (0-100)': item.qualityScore,
+      'Conceito': `Nível ${item.qualityConcept}`,
       'Lotes no Período': item.totalBatches,
+      'Lotes 100% Limpos (%)': `${item.cleanBatchesRatePercent}%`,
       'Total de Ensaios': item.totalEnsaios,
       'Ensaios Concluídos': item.totalEnsaiosDelivered,
+      'Lead Time Médio Envio (Dias)': item.avgDeliveryDays !== null ? item.avgDeliveryDays : 'N/A',
+      'Entregas ≤ 10d (Prazo Base)': item.baseOnTimeCount,
+      'Entregas 11-17d (Tolerância Correios)': item.correiosToleranceCount,
+      'Atrasos > 17d (Fora do Prazo)': item.delayCount,
       'Ocorrências de NC': item.ncCount,
       'Placas com NC': item.ncPlatesCount,
       'Taxa de Erro (%)': `${item.errorRatePercent}%`,
-      'Atrasos de Entrega': item.delayCount,
-      'Status de Conformidade': item.isFullyCompliant ? '100% CONFORME (SEM NC / SEM ATRASO)' : 'COM OCORRÊNCIA'
+      'Principal Não-Conformidade': item.topNcReason ? `${item.topNcReason.name} (${item.topNcReason.plates} pl.)` : 'Nenhuma',
+      'Risco Regulatório': `${item.regulatoryRiskLevel} (${item.regulatoryRiskLabel})`,
+      'Notificações Emitidas': item.notificationsCount,
+      'Último Envio': item.lastReceiptDate ? format(item.lastReceiptDate, 'dd/MM/yyyy') : 'Sem registro',
+      'Dias Sem Enviar': item.daysSinceLastDelivery !== null ? item.daysSinceLastDelivery : 'N/A',
+      'Status de Conformidade': item.isFullyCompliant ? '100% CONFORME (SEM NC / SEM ATRASO >17D)' : 'COM OCORRÊNCIA'
     }));
 
     const ws = utils.json_to_sheet(exportData);
     const wb = utils.book_new();
-    utils.book_append_sheet(wb, ws, 'Desempenho_PACs');
+    utils.book_append_sheet(wb, ws, 'KPIs_Desempenho_PACs');
     
     const startStr = statsStartDate || 'inicio';
     const endStr = statsEndDate || 'fim';
-    writeFile(wb, `Desempenho_e_Conformidade_PACs_${startStr}_ate_${endStr}.xlsx`);
+    writeFile(wb, `KPIs_Desempenho_e_Conformidade_PACs_${startStr}_ate_${endStr}.xlsx`);
   };
 
   // Copy list handler
@@ -6610,13 +7668,15 @@ function PacUnifiedAnalyticsSection({
     const endStr = statsEndDate ? format(parseLocalDate(statsEndDate), 'dd/MM/yyyy') : 'Fim';
     
     const lines = [
-      `RELATÓRIO DE DESEMPENHO E CONFORMIDADE DOS PACS`,
+      `RELATÓRIO DE KPIS, DESEMPENHO E CONFORMIDADE DOS PACS`,
       `Período Analisado: ${startStr} até ${endStr}`,
+      `Regra de Prazo do PAC: 10 dias (base) + 7 dias (Correios) = 17 dias da Data Inicial até o Recebimento`,
       `PACs 100% Conformes: ${pacMetrics.compliantPacsCount} de ${pacMetrics.totalActivePacsCount} (${pacMetrics.compliancePercentage}%)`,
+      `Score Médio da Rede: ${pacMetrics.avgQualityScore}/100 pts | Lead Time Médio de Envio: ${pacMetrics.globalAvgDeliveryDays} dias`,
       `Volume Total de Ensaios no Período: ${pacMetrics.totalEnsaiosPeriod.toLocaleString('pt-BR')}`,
       `--------------------------------------------------`,
       ...displayedPacs.map((p, idx) => 
-        `${idx + 1}. ${p.pac} -> ${p.totalEnsaios.toLocaleString('pt-BR')} ensaios (${p.totalBatches} lotes) | NCs: ${p.ncCount} (${p.errorRatePercent}%) | Atrasos: ${p.delayCount}`
+        `${idx + 1}. ${p.pac} [Conceito ${p.qualityConcept} - ${p.qualityScore}pts] -> ${p.totalEnsaios.toLocaleString('pt-BR')} ensaios (${p.totalBatches} lotes) | Lead Time: ${p.avgDeliveryDays ?? '-'}d | NCs: ${p.ncPlatesCount} pl. (${p.errorRatePercent}%) | Atrasos (>17d): ${p.delayCount} | Risco: ${p.regulatoryRiskLabel}`
       )
     ].join('\n');
 
@@ -6634,11 +7694,16 @@ function PacUnifiedAnalyticsSection({
             <ShieldCheck size={26} />
           </div>
           <div>
-            <h3 className="text-xl font-display font-bold tracking-tight text-gray-900">
-              Desempenho, Volume e Conformidade por PAC
-            </h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-xl font-display font-bold tracking-tight text-gray-900">
+                Central de KPIs, Qualidade e Conformidade por PAC
+              </h3>
+              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-blue-50 text-blue-800 border border-blue-200">
+                Prazo Oficial: 10d + 7d Correios (17 dias)
+              </span>
+            </div>
             <p className="text-xs text-[#5A5A40]/70 mt-0.5">
-              Visão unificada de produção de ensaios, índice de falhas (placas não-conformes), pontualidade e evolução temporal por PAC.
+              Score Geral (A/B/C), Lead Time de Envio (10d + 7d tolerância postal), Diagnóstico Técnico, Risco Regulatório e Regularidade.
             </p>
           </div>
         </div>
@@ -6653,7 +7718,7 @@ function PacUnifiedAnalyticsSection({
                 viewMode === 'ranking' ? "bg-white text-[#5A5A40] shadow-xs" : "text-[#5A5A40]/60 hover:text-[#5A5A40]"
               )}
             >
-              Tabela & Conformidade
+              Matriz de KPIs & Ranking
             </button>
             <button
               onClick={() => setViewMode('evolution')}
@@ -6683,55 +7748,90 @@ function PacUnifiedAnalyticsSection({
         </div>
       </div>
 
-      {/* KPI Summary Cards dos PACs */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-[#f5f5f0]/70 border border-[#e5e5e0] p-5 rounded-2xl">
-          <div className="flex items-center justify-between text-[#5A5A40] mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Volume Total dos PACs</span>
-            <BarChart3 size={18} className="text-[#5A5A40]" />
-          </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {pacMetrics.totalEnsaiosPeriod.toLocaleString('pt-BR')}
-          </div>
-          <p className="text-[11px] text-[#5A5A40]/70 mt-1 font-medium">
-            Em {pacMetrics.totalActivePacsCount} PACs com movimentação
-          </p>
-        </div>
-
-        <div className="bg-emerald-50/70 border border-emerald-200/80 p-5 rounded-2xl">
+      {/* 5 KPI Summary Cards dos PACs */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        {/* Card 1: Score Médio & Conformidade */}
+        <div className="bg-emerald-50/70 border border-emerald-200/80 p-4 rounded-2xl flex flex-col justify-between">
           <div className="flex items-center justify-between text-emerald-800 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">PACs 100% Conformes</span>
-            <CheckCircle2 size={18} className="text-emerald-600" />
+            <span className="text-[11px] font-bold uppercase tracking-wider">Score Médio da Rede</span>
+            <ShieldCheck size={17} className="text-emerald-600" />
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-emerald-900">{pacMetrics.compliantPacsCount}</span>
-            <span className="text-xs font-bold text-emerald-700">
-              ({pacMetrics.compliancePercentage}%)
-            </span>
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-bold text-emerald-950">{pacMetrics.avgQualityScore}</span>
+              <span className="text-xs font-bold text-emerald-700">/ 100 pts</span>
+            </div>
+            <p className="text-[11px] text-emerald-800/80 mt-1 font-medium">
+              <strong>{pacMetrics.compliantPacsCount}</strong> de {pacMetrics.totalActivePacsCount} PACs 100% conformes ({pacMetrics.compliancePercentage}%)
+            </p>
           </div>
-          <p className="text-[11px] text-emerald-700/80 mt-1 font-medium">Zero NCs e zero atrasos no período</p>
         </div>
 
-        <div className="bg-blue-50/70 border border-blue-200/80 p-5 rounded-2xl">
+        {/* Card 2: Volume Total */}
+        <div className="bg-[#f5f5f0]/70 border border-[#e5e5e0] p-4 rounded-2xl flex flex-col justify-between">
+          <div className="flex items-center justify-between text-[#5A5A40] mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider">Volume Total dos PACs</span>
+            <BarChart3 size={17} className="text-[#5A5A40]" />
+          </div>
+          <div>
+            <div className="text-2xl font-bold text-gray-900">
+              {pacMetrics.totalEnsaiosPeriod.toLocaleString('pt-BR')}
+            </div>
+            <p className="text-[11px] text-[#5A5A40]/70 mt-1 font-medium">
+              <strong>{pacMetrics.totalEnsaiosCompliant.toLocaleString('pt-BR')}</strong> ensaios em PACs s/ ocorrências
+            </p>
+          </div>
+        </div>
+
+        {/* Card 3: Lead Time Médio de Envio (Regra 10d + 7d Correios = 17d) */}
+        <div className="bg-blue-50/70 border border-blue-200/80 p-4 rounded-2xl flex flex-col justify-between">
           <div className="flex items-center justify-between text-blue-800 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Ensaios s/ Ocorrência</span>
-            <TrendingUp size={18} className="text-blue-600" />
+            <span className="text-[11px] font-bold uppercase tracking-wider">Lead Time Médio Envio</span>
+            <Clock size={17} className="text-blue-600" />
           </div>
-          <div className="text-2xl font-bold text-blue-950">
-            {pacMetrics.totalEnsaiosCompliant.toLocaleString('pt-BR')}
+          <div>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-2xl font-bold text-blue-950">{pacMetrics.globalAvgDeliveryDays}</span>
+              <span className="text-xs font-bold text-blue-700">dias (Limite: 17d)</span>
+            </div>
+            <p className="text-[11px] text-blue-800/80 mt-1 font-medium">
+              <strong>{pacMetrics.totalCorreiosToleranceBatches}</strong> lotes na tolerância Correios (11–17d)
+            </p>
           </div>
-          <p className="text-[11px] text-blue-700/80 mt-1 font-medium">Entregues por PACs 100% regulares</p>
         </div>
 
-        <div className="bg-amber-50/70 border border-amber-200/80 p-5 rounded-2xl">
+        {/* Card 4: Termômetro de Risco Regulatório */}
+        <div className="bg-amber-50/70 border border-amber-200/80 p-4 rounded-2xl flex flex-col justify-between">
           <div className="flex items-center justify-between text-amber-800 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">PACs com Ocorrências</span>
-            <AlertTriangle size={18} className="text-amber-600" />
+            <span className="text-[11px] font-bold uppercase tracking-wider">Risco Regulatório / NC</span>
+            <AlertTriangle size={17} className="text-amber-600" />
           </div>
-          <div className="text-2xl font-bold text-amber-950">
-            {pacMetrics.nonCompliantPacsCount}
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-bold text-amber-950">{pacMetrics.nonCompliantPacsCount}</span>
+              <span className="text-xs font-bold text-amber-800">c/ ocorrências</span>
+            </div>
+            <p className="text-[11px] text-amber-800/80 mt-1 font-medium">
+              <strong>{pacMetrics.highRiskPacsCount}</strong> em alerta crítico • <strong>{pacMetrics.totalLateBatches}</strong> lotes &gt;17d
+            </p>
           </div>
-          <p className="text-[11px] text-amber-700/80 mt-1 font-medium">Apresentaram NC ou atraso de prazo</p>
+        </div>
+
+        {/* Card 5: Regularidade de Envio / Inatividade */}
+        <div className="bg-purple-50/60 border border-purple-200/80 p-4 rounded-2xl flex flex-col justify-between">
+          <div className="flex items-center justify-between text-purple-900 mb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider">Alerta de Inatividade</span>
+            <History size={17} className="text-purple-600" />
+          </div>
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-bold text-purple-950">{pacMetrics.inactivePacsCount}</span>
+              <span className="text-xs font-bold text-purple-700">PACs &gt;30d s/ envio</span>
+            </div>
+            <p className="text-[11px] text-purple-800/80 mt-1 font-medium">
+              Monitoramento de regularidade de remessa
+            </p>
+          </div>
         </div>
       </div>
 
@@ -6743,16 +7843,16 @@ function PacUnifiedAnalyticsSection({
               <button
                 onClick={() => setComplianceTab('all')}
                 className={cn(
-                  "px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                  "px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer",
                   complianceTab === 'all' ? "bg-white text-[#5A5A40] shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
                 )}
               >
-                Todos Ativos ({pacMetrics.totalActivePacsCount})
+                Todos no Período ({pacMetrics.totalActivePacsCount})
               </button>
               <button
                 onClick={() => setComplianceTab('compliant')}
                 className={cn(
-                  "px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                  "px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
                   complianceTab === 'compliant' ? "bg-white text-emerald-800 shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
                 )}
               >
@@ -6762,12 +7862,32 @@ function PacUnifiedAnalyticsSection({
               <button
                 onClick={() => setComplianceTab('nonCompliant')}
                 className={cn(
-                  "px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                  "px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
                   complianceTab === 'nonCompliant' ? "bg-white text-amber-800 shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
                 )}
               >
                 <AlertTriangle size={14} className={complianceTab === 'nonCompliant' ? "text-amber-600" : ""} />
                 Com Ocorrências ({pacMetrics.nonCompliantPacsCount})
+              </button>
+              <button
+                onClick={() => setComplianceTab('highRisk')}
+                className={cn(
+                  "px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                  complianceTab === 'highRisk' ? "bg-white text-red-800 shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
+                )}
+              >
+                <AlertCircle size={14} className={complianceTab === 'highRisk' ? "text-red-600" : ""} />
+                Risco Crítico / Nível C ({pacMetrics.highRiskPacsCount})
+              </button>
+              <button
+                onClick={() => setComplianceTab('inactive')}
+                className={cn(
+                  "px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                  complianceTab === 'inactive' ? "bg-white text-purple-900 shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
+                )}
+              >
+                <Clock size={14} className={complianceTab === 'inactive' ? "text-purple-600" : ""} />
+                Inativos &gt;30d ({pacMetrics.inactivePacsCount})
               </button>
             </div>
 
@@ -6778,11 +7898,14 @@ function PacUnifiedAnalyticsSection({
                 className="px-3 py-2 bg-[#f5f5f0] border-none rounded-xl text-xs font-bold text-[#5A5A40] focus:ring-2 focus:ring-[#5A5A40]/20 focus:outline-none"
               >
                 <option value="ensaios_desc">Ordenar: Maior Volume de Ensaios</option>
+                <option value="score_asc">Ordenar: Pior Score / Maior Criticidade</option>
+                <option value="score_desc">Ordenar: Melhor Score de Qualidade (A→C)</option>
                 <option value="nc_desc">Ordenar: Maior Nº de Falhas / NCs</option>
+                <option value="leadtime_desc">Ordenar: Maior Tempo de Envio (Lead Time)</option>
                 <option value="alphabetical">Ordenar: Ordem Alfabética (A-Z)</option>
               </select>
 
-              <div className="relative w-full sm:w-60">
+              <div className="relative w-full sm:w-56">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={15} />
                 <input
                   type="text"
@@ -6795,85 +7918,177 @@ function PacUnifiedAnalyticsSection({
             </div>
           </div>
 
-          {/* Unified PAC Table */}
+          {/* Unified PAC KPI Table */}
           <div className="overflow-x-auto rounded-2xl border border-[#e5e5e0]">
             <table className="w-full text-left">
               <thead>
-                <tr className="bg-[#f5f5f0] text-[10px] uppercase font-bold text-[#5A5A40] opacity-80 border-b border-[#e5e5e0]">
-                  <th className="py-3.5 px-4">PAC</th>
-                  <th className="py-3.5 px-4 text-center">Lotes</th>
-                  <th className="py-3.5 px-4 text-center">Volume de Ensaios</th>
-                  <th className="py-3.5 px-4 text-center">Não Conformidades</th>
-                  <th className="py-3.5 px-4 text-center">Índice de Falha</th>
-                  <th className="py-3.5 px-4 text-center">Atrasos</th>
-                  <th className="py-3.5 px-4 text-center">Situação</th>
-                  <th className="py-3.5 px-4 text-right">Detalhes</th>
+                <tr className="bg-[#f5f5f0] text-[10px] uppercase font-bold text-[#5A5A40] opacity-85 border-b border-[#e5e5e0]">
+                  <th className="py-3.5 px-4">PAC & Regularidade</th>
+                  <th className="py-3.5 px-3 text-center">Score & Conceito</th>
+                  <th className="py-3.5 px-3 text-center">Volume & Lotes Limpos</th>
+                  <th className="py-3.5 px-3 text-center">Lead Time Envio (10d+7d)</th>
+                  <th className="py-3.5 px-3 text-center">Falhas & Diagnóstico</th>
+                  <th className="py-3.5 px-3 text-center">Atrasos (&gt;17d)</th>
+                  <th className="py-3.5 px-3 text-center">Risco Regulatório</th>
+                  <th className="py-3.5 px-4 text-right">Raio-X</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#f5f5f0] bg-white">
                 {displayedPacs.map((row, idx) => (
                   <tr key={row.pac} className="group hover:bg-[#f5f5f0]/40 transition-colors">
+                    {/* Coluna 1: PAC + Regularidade de Envio */}
                     <td className="py-3.5 px-4">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono font-bold text-gray-400 w-5">{idx + 1}º</span>
-                        <span className="font-bold text-sm text-gray-800">{row.pac}</span>
+                      <div className="flex items-start gap-2">
+                        <span className="text-[10px] font-mono font-bold text-gray-400 w-5 mt-0.5">{idx + 1}º</span>
+                        <div>
+                          <span className="font-bold text-sm text-gray-900 block">{row.pac}</span>
+                          <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                            {row.lastReceiptDate ? (
+                              <span className={cn(
+                                "text-[10px] font-medium px-1.5 py-0.5 rounded",
+                                row.isInactiveAlert
+                                  ? "bg-purple-100 text-purple-900 font-bold"
+                                  : "text-gray-500 bg-gray-100"
+                              )}>
+                                Último envio: {format(row.lastReceiptDate, 'dd/MM/yyyy')} ({row.daysSinceLastDelivery}d atrás)
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-bold text-purple-800 bg-purple-50 px-1.5 py-0.5 rounded">
+                                Sem histórico de envio
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
                     </td>
-                    <td className="py-3.5 px-4 text-center font-medium text-xs text-gray-600">
-                      {row.totalBatches}
+
+                    {/* Coluna 2: Score de Qualidade & Conceito A/B/C */}
+                    <td className="py-3.5 px-3 text-center">
+                      <div className="inline-flex items-center gap-1.5">
+                        <span className={cn(
+                          "w-6 h-6 rounded-lg text-xs font-extrabold flex items-center justify-center border",
+                          row.qualityConcept === 'A'
+                            ? "bg-emerald-100 text-emerald-900 border-emerald-300"
+                            : row.qualityConcept === 'B'
+                              ? "bg-amber-100 text-amber-900 border-amber-300"
+                              : "bg-red-100 text-red-900 border-red-300"
+                        )}>
+                          {row.qualityConcept}
+                        </span>
+                        <div className="text-left">
+                          <span className="text-xs font-extrabold text-gray-900 block leading-none">{row.qualityScore} pts</span>
+                          <span className="text-[9px] text-gray-400 font-semibold">de 100</span>
+                        </div>
+                      </div>
                     </td>
-                    <td className="py-3.5 px-4 text-center">
-                      <span className="font-extrabold text-xs text-gray-900 bg-gray-100 px-2.5 py-1 rounded-lg">
-                        {row.totalEnsaios.toLocaleString('pt-BR')}
+
+                    {/* Coluna 3: Volume & Taxa de Lotes Limpos (First Pass Yield) */}
+                    <td className="py-3.5 px-3 text-center">
+                      <span className="font-extrabold text-xs text-gray-900 bg-gray-100 px-2.5 py-1 rounded-lg inline-block">
+                        {row.totalEnsaios.toLocaleString('pt-BR')} ensaios
+                      </span>
+                      <span className="block text-[10px] text-gray-500 mt-1 font-medium">
+                        {row.totalBatches} {row.totalBatches === 1 ? 'lote' : 'lotes'} • <strong className={row.cleanBatchesRatePercent === 100 ? "text-emerald-700" : "text-amber-700"}>{row.cleanBatchesRatePercent}% limpos</strong>
                       </span>
                     </td>
-                    <td className="py-3.5 px-4 text-center">
+
+                    {/* Coluna 4: Lead Time Médio de Envio (10d + 7d Correios = 17d) */}
+                    <td className="py-3.5 px-3 text-center">
+                      {row.avgDeliveryDays !== null ? (
+                        <div>
+                          <span className={cn(
+                            "px-2.5 py-0.5 rounded-full text-xs font-mono font-bold inline-block",
+                            row.avgDeliveryDays <= PRAZO_BASE_PAC_DIAS
+                              ? "bg-emerald-50 text-emerald-800"
+                              : row.avgDeliveryDays <= PRAZO_MAXIMO_ENTREGA_PAC_DIAS
+                                ? "bg-blue-50 text-blue-800"
+                                : "bg-amber-100 text-amber-900"
+                          )}>
+                            {row.avgDeliveryDays} dias
+                          </span>
+                          <span className="block text-[10px] text-gray-400 mt-0.5">
+                            {row.baseOnTimeCount} ≤10d • {row.correiosToleranceCount} Correios (11-17d)
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-400">-</span>
+                      )}
+                    </td>
+
+                    {/* Coluna 5: Não Conformidades & Principal Diagnóstico */}
+                    <td className="py-3.5 px-3 text-center max-w-[200px]">
                       {row.ncCount === 0 ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">
-                          <Check size={12} /> 0 NCs
+                          <Check size={12} /> 0 NCs (0%)
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-red-50 text-red-700 rounded-full text-xs font-bold">
-                          <AlertCircle size={12} /> {row.ncPlatesCount} {row.ncPlatesCount === 1 ? 'placa' : 'placas'} ({row.ncCount})
-                        </span>
+                        <div>
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-50 text-red-700 rounded-full text-xs font-bold">
+                            <AlertCircle size={11} /> {row.ncPlatesCount} pl. ({row.errorRatePercent}%)
+                          </span>
+                          {row.topNcReason && (
+                            <span
+                              className="block text-[10px] text-red-800/80 font-medium truncate mt-0.5"
+                              title={`Principal falha: ${row.topNcReason.name} (${row.topNcReason.plates} placas)`}
+                            >
+                              1º: {row.topNcReason.name}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </td>
-                    <td className="py-3.5 px-4 text-center">
-                      <span className={cn(
-                        "text-xs font-mono font-bold",
-                        row.errorRatePercent === 0 ? "text-emerald-600" : row.errorRatePercent <= 2 ? "text-amber-700" : "text-red-700"
-                      )}>
-                        {row.errorRatePercent}%
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 text-center">
+
+                    {/* Coluna 6: Atrasos (> 17 dias) */}
+                    <td className="py-3.5 px-3 text-center">
                       {row.delayCount === 0 ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">
-                          <Check size={12} /> 0
+                          <Check size={12} /> 0 (&le;17d)
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-50 text-amber-800 rounded-full text-xs font-bold">
-                          <Clock size={12} /> {row.delayCount}
+                        <div>
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-100 text-amber-900 rounded-full text-xs font-bold">
+                            <Clock size={12} /> {row.delayCount} {row.delayCount === 1 ? 'lote' : 'lotes'} &gt;17d
+                          </span>
+                          <span className="block text-[10px] text-amber-800/80 mt-0.5 font-medium">
+                            Pontualidade: {row.onTimeDeliveryRatePercent}%
+                          </span>
+                        </div>
+                      )}
+                    </td>
+
+                    {/* Coluna 7: Termômetro de Risco Regulatório */}
+                    <td className="py-3.5 px-3 text-center">
+                      <span className={cn(
+                        "inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold",
+                        row.regulatoryRiskLevel === 'ALTO'
+                          ? "bg-red-100 text-red-900 border border-red-200"
+                          : row.regulatoryRiskLevel === 'MODERADO'
+                            ? "bg-amber-100 text-amber-900 border border-amber-200"
+                            : "bg-emerald-100 text-emerald-800"
+                      )}>
+                        {row.regulatoryRiskLevel === 'ALTO' ? (
+                          <AlertCircle size={12} className="text-red-600 shrink-0" />
+                        ) : row.regulatoryRiskLevel === 'MODERADO' ? (
+                          <AlertTriangle size={12} className="text-amber-700 shrink-0" />
+                        ) : (
+                          <CheckCircle2 size={12} className="text-emerald-600 shrink-0" />
+                        )}
+                        <span>{row.regulatoryRiskLabel}</span>
+                      </span>
+                      {row.notificationsCount > 0 && (
+                        <span className="block text-[10px] text-gray-500 mt-0.5 font-semibold">
+                          {row.notificationsCount} {row.notificationsCount === 1 ? 'notificação' : 'notificações'}
                         </span>
                       )}
                     </td>
-                    <td className="py-3.5 px-4 text-center">
-                      {row.isFullyCompliant ? (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg text-[11px] font-bold">
-                          <CheckCircle2 size={12} className="text-emerald-600" /> 100% Conforme
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-100 text-amber-900 rounded-lg text-[11px] font-bold">
-                          <AlertTriangle size={12} className="text-amber-700" /> Com Ocorrência
-                        </span>
-                      )}
-                    </td>
+
+                    {/* Coluna 8: Ação Raio-X / Ver Lotes */}
                     <td className="py-3.5 px-4 text-right">
                       <button
                         onClick={() => setSelectedPacForModal(row)}
-                        className="px-3 py-1.5 bg-[#f5f5f0] hover:bg-gray-200 text-[#5A5A40] rounded-lg text-xs font-bold transition-all cursor-pointer"
+                        className="px-3 py-1.5 bg-[#f5f5f0] hover:bg-[#5A5A40] hover:text-white text-[#5A5A40] rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
                       >
-                        Ver Lotes
+                        Raio-X / Lotes
                       </button>
                     </td>
                   </tr>
@@ -6977,14 +8192,26 @@ function PacUnifiedAnalyticsSection({
         </div>
       )}
 
-      {/* Modal for viewing batch details for a PAC */}
+      {/* Modal Raio-X do PAC & Lotes no Período */}
       {selectedPacForModal && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 space-y-4 shadow-xl border border-[#e5e5e0] max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b pb-4">
+          <div className="bg-white rounded-3xl max-w-3xl w-full p-6 space-y-5 shadow-xl border border-[#e5e5e0] max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between border-b pb-4">
               <div>
-                <span className="text-[10px] font-bold uppercase text-[#5A5A40] opacity-60">Lotes do PAC no Período</span>
-                <h3 className="text-lg font-bold text-gray-900">{selectedPacForModal.pac}</h3>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase text-[#5A5A40] opacity-60">Raio-X de KPIs & Lotes do PAC</span>
+                  <span className={cn(
+                    "px-2 py-0.5 rounded-md text-[10px] font-extrabold",
+                    selectedPacForModal.qualityConcept === 'A'
+                      ? "bg-emerald-100 text-emerald-900"
+                      : selectedPacForModal.qualityConcept === 'B'
+                        ? "bg-amber-100 text-amber-900"
+                        : "bg-red-100 text-red-900"
+                  )}>
+                    Conceito {selectedPacForModal.qualityConcept} ({selectedPacForModal.qualityScore}/100 pts)
+                  </span>
+                </div>
+                <h3 className="text-xl font-bold text-gray-900 mt-0.5">{selectedPacForModal.pac}</h3>
               </div>
               <button
                 onClick={() => setSelectedPacForModal(null)}
@@ -6994,16 +8221,91 @@ function PacUnifiedAnalyticsSection({
               </button>
             </div>
 
+            {/* Resumo Executivo dos 5 KPIs do PAC no Modal */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-3 rounded-2xl bg-[#f9f9f6] border border-[#e5e5e0]">
+                <span className="text-[10px] font-bold uppercase text-[#5A5A40]/70 block">Qualidade & Lotes Limpos</span>
+                <span className="text-base font-extrabold text-gray-900">{selectedPacForModal.cleanBatchesRatePercent}% limpos</span>
+                <span className="block text-[10px] text-gray-500 mt-0.5">
+                  {selectedPacForModal.cleanBatchesCount} de {selectedPacForModal.totalBatches} lotes sem falhas/atraso
+                </span>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-blue-50/50 border border-blue-200/70">
+                <span className="text-[10px] font-bold uppercase text-blue-800 block">Lead Time (Limite 17d)</span>
+                <span className="text-base font-extrabold text-blue-950">
+                  {selectedPacForModal.avgDeliveryDays !== null ? `${selectedPacForModal.avgDeliveryDays} dias` : 'N/A'}
+                </span>
+                <span className="block text-[10px] text-blue-800/80 mt-0.5">
+                  {selectedPacForModal.baseOnTimeCount} ≤10d • {selectedPacForModal.correiosToleranceCount} Correios (11-17d) • {selectedPacForModal.delayCount} &gt;17d
+                </span>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-amber-50/50 border border-amber-200/70">
+                <span className="text-[10px] font-bold uppercase text-amber-900 block">Risco Regulatório</span>
+                <span className="text-sm font-extrabold text-amber-950 block">{selectedPacForModal.regulatoryRiskLabel}</span>
+                <span className="block text-[10px] text-amber-800/80 mt-0.5">
+                  {selectedPacForModal.notificationsCount} notificações • {selectedPacForModal.defensesCount} defesas
+                </span>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-purple-50/50 border border-purple-200/70">
+                <span className="text-[10px] font-bold uppercase text-purple-900 block">Regularidade de Envio</span>
+                <span className="text-sm font-extrabold text-purple-950 block">
+                  {selectedPacForModal.lastReceiptDate ? format(selectedPacForModal.lastReceiptDate, 'dd/MM/yyyy') : 'Sem envio'}
+                </span>
+                <span className="block text-[10px] text-purple-800/80 mt-0.5">
+                  {selectedPacForModal.daysSinceLastDelivery !== null ? `${selectedPacForModal.daysSinceLastDelivery} dias desde a última remessa` : 'Nenhum lote registrado'}
+                </span>
+              </div>
+            </div>
+
+            {/* Diagnóstico Técnico de Não-Conformidades do PAC */}
+            {selectedPacForModal.sortedReasons && selectedPacForModal.sortedReasons.length > 0 && (
+              <div className="p-3.5 rounded-2xl bg-red-50/60 border border-red-200/80 space-y-2">
+                <span className="text-[10px] font-bold uppercase text-red-900 block">
+                  Diagnóstico Técnico — Principais Motivos de Não-Conformidade do PAC no Período
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {selectedPacForModal.sortedReasons.map((r: any, idx: number) => (
+                    <span key={r.name} className="px-2.5 py-1 rounded-lg bg-white border border-red-200 text-xs font-bold text-red-800">
+                      {idx + 1}º {r.name}: {r.plates} {r.plates === 1 ? 'placa' : 'placas'} ({r.occurrences} {r.occurrences === 1 ? 'lote' : 'lotes'})
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="space-y-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-[#5A5A40]">
+                Relação de Lotes no Período ({selectedPacForModal.pacBatches.length})
+              </h4>
               {selectedPacForModal.pacBatches.map((b: any) => {
                 const batchNCs = (b.nonConformities && Array.isArray(b.nonConformities) && b.nonConformities.length > 0)
                   ? b.nonConformities
                   : (nonConformityRecords || []).filter((nc: any) => nc.recebimento_lote_id === b.id);
+                const pacEval = evaluatePacDeliveryDeadline(b.periodoInicial, b.recebidoEm, b.ensaioForaDoPrazo);
 
                 return (
                   <div key={b.id} className="p-4 bg-[#f5f5f0]/60 rounded-2xl border border-[#e5e5e0] space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-gray-800">Lote ID: {b.id}</span>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-gray-800">
+                          Período: {pacEval.pInicialDate ? format(pacEval.pInicialDate, 'dd/MM/yyyy') : '-'} a {toSafeDate(b.periodoFinal) ? format(toSafeDate(b.periodoFinal)!, 'dd/MM/yyyy') : '-'}
+                        </span>
+                        {pacEval.elapsedDays !== null && (
+                          <span className={cn(
+                            "text-[10px] font-bold px-2 py-0.5 rounded-md",
+                            pacEval.isLate
+                              ? "bg-amber-100 text-amber-900 border border-amber-300"
+                              : pacEval.isWithinCorreiosTolerance
+                                ? "bg-blue-100 text-blue-800"
+                                : "bg-emerald-100 text-emerald-800"
+                          )}>
+                            Envio em {pacEval.elapsedDays}d {pacEval.isLate ? `(Fora do prazo >17d)` : pacEval.isWithinCorreiosTolerance ? `(Tolerância Correios 10d+7d)` : `(No prazo ≤10d)`}
+                          </span>
+                        )}
+                      </div>
                       <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-md">
                         {b.numEnsaios} ensaios
                       </span>
@@ -7048,14 +8350,20 @@ function PacUnifiedAnalyticsSection({
                       </div>
                     )}
 
-                    {b.ensaioForaDoPrazo && (
+                    {pacEval.isLate && (
                       <div className="text-xs text-amber-800 bg-amber-100 p-2 rounded-lg font-bold flex items-center gap-1.5">
-                        <AlertTriangle size={14} className="text-amber-600" /> Lote marcado como entrega fora do prazo.
+                        <AlertTriangle size={14} className="text-amber-600" />
+                        Entrega fora do prazo regulamentar (Regra 10d + 7d Correios = 17 dias da data inicial{pacEval.maxDeadlineDate ? ` • Limite era ${format(pacEval.maxDeadlineDate, 'dd/MM/yyyy')}` : ''}).
                       </div>
                     )}
                   </div>
                 );
               })}
+              {selectedPacForModal.pacBatches.length === 0 && (
+                <div className="p-6 text-center text-xs text-gray-400 italic bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                  Nenhum lote recebido para este PAC no período selecionado.
+                </div>
+              )}
             </div>
 
             <div className="pt-2 text-right">

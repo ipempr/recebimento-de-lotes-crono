@@ -168,9 +168,9 @@ export function SystemTutorial() {
                 </div>
 
                 <div className="p-4 rounded-2xl border border-gray-200 bg-white shadow-xs hover:border-[#5A5A40]/30 transition-colors">
-                  <span className="font-bold text-xs text-[#5A5A40] block mb-1">📅 Controle de Ensaio Fora do Prazo (Atrasado)</span>
+                  <span className="font-bold text-xs text-[#5A5A40] block mb-1">📅 Regra de Prazo do PAC (10d + 7d Correios + Recessos)</span>
                   <p className="text-[11px] text-gray-500 leading-normal">
-                    Ao marcar <b>"ensaio entregue fora do prazo"</b> nas propriedades do lote, as notificações geradas indicarão automaticamente a infração administrativa correspondente ao período do lote, constando a data inicial, final e o correspondente número de ensaios aferidos.
+                    O PAC deve entregar o lote em até <b>10 dias</b> da data inicial + <b>7 dias de tolerância postal (Correios)</b> = <b>17 dias corridos</b>. No Dashboard, o sinal de <b>Alerta</b> só é acionado quando o lote ultrapassa a data de tolerância. Além disso, em <b>Configurações → Prazos e Recessos</b>, é possível cadastrar intervalos nomeados de feriados ou recessos para adicionar dias ao prazo ou desconsiderar atrasos no período.
                   </p>
                 </div>
 
@@ -226,7 +226,7 @@ export function SystemTutorial() {
                       <div className="flex items-center pt-5">
                         <div className="flex items-center gap-2 text-amber-900 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-bold w-full justify-center">
                           <input type="checkbox" checked disabled className="accent-amber-600" />
-                          <span>Fora do Prazo ⚠️</span>
+                          <span>Fora do Prazo (&gt;17d) ⚠️</span>
                         </div>
                       </div>
                     </div>
@@ -245,45 +245,45 @@ export function SystemTutorial() {
               </div>
 
               <p className="text-xs text-gray-600 leading-relaxed">
-                Este módulo compila todas as informações cadastradas de lotes para estruturar gráficos analíticos e painéis informativos para tomadas de decisão regulatórias dos administradores do IPEM-PR.
+                Este módulo compila todas as informações cadastradas de lotes para estruturar indicadores executivos (KPIs) da equipe interna (ponderação 3% Recebidos, 27% Lidos, 70% Informados) e a Central de KPIs por PAC (Score A/B/C, Lead Time com regra de 10d + 7d Correios, Diagnóstico Técnico, Risco Regulatório e Regularidade de Envio).
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="p-4 bg-white border border-gray-200 rounded-2xl shadow-xs">
-                  <div className="text-2xl font-black text-red-650">94.8%</div>
-                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mt-1">Índice Geral de Conformidade</div>
+                  <div className="text-2xl font-black text-red-650">Score A / B / C</div>
+                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mt-1">Nota Geral de Qualidade do PAC</div>
                   <p className="text-[10px] text-gray-500 leading-snug mt-1">
-                    Percentual de ensaios cujas placas obtiveram o status regular de aprovação sem desvios graves de leitura.
+                    Combina a qualidade técnica (placas sem erro) e a pontualidade administrativa (entrega em até 17 dias: 10d base + 7d Correios).
                   </p>
                 </div>
 
                 <div className="p-4 bg-white border border-gray-200 rounded-2xl shadow-xs">
-                  <div className="text-2xl font-black text-amber-650">26 Lotes</div>
-                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mt-1">Entregas Fora do Prazo</div>
+                  <div className="text-2xl font-black text-amber-650">10d + 7d = 17d</div>
+                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mt-1">Lead Time & Tolerância Correios</div>
                   <p className="text-[10px] text-gray-500 leading-snug mt-1">
-                    O número total de remessas marcadas com revalidação de entrega tardia para notificações administrativas.
+                    Monitora a média de dias da data inicial até o recebimento, separando entregas no prazo base (≤10d), tolerância Correios (11–17d) e atrasos (&gt;17d).
                   </p>
                 </div>
 
                 <div className="p-4 bg-white border border-gray-200 rounded-2xl shadow-xs">
-                  <div className="text-2xl font-black text-blue-650">14 PACs</div>
-                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mt-1">Monitorados Ativos</div>
+                  <div className="text-2xl font-black text-blue-650">Raio-X do PAC</div>
+                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mt-1">Diagnóstico & Risco Regulatório</div>
                   <p className="text-[10px] text-gray-500 leading-snug mt-1">
-                    Postos de Atendimento ao Consumidor cadastrados e enviando relatórios periódicos de fiscalização.
+                    Exibe a principal não-conformidade de cada PAC, taxa de lotes 100% limpos, proximidade de autuação e alerta de inatividade (&gt;30 dias sem envio).
                   </p>
                 </div>
               </div>
 
               <div className="bg-gray-50 p-6 rounded-2xl border border-gray-200 space-y-4">
-                <h4 className="text-xs font-bold text-gray-700">Metodologia de Gráficos Integrados</h4>
+                <h4 className="text-xs font-bold text-gray-700">Metodologia de Gráficos e KPIs Integrados</h4>
                 <div className="space-y-2 text-xs text-gray-600">
                   <div className="flex items-start gap-2">
                     <CheckCircle size={15} className="text-green-600 shrink-0 mt-0.5" />
-                    <span><b>Volume Geral por PAC</b>: Compara instantaneamente os postos de maior produtividade com os que registram mais não-conformidades técnicas.</span>
+                    <span><b>Matriz de KPIs por PAC</b>: Compara instantaneamente Score (0–100), Conceito (A/B/C), Lead Time de Envio, principal falha técnica e termômetro de risco regulatório.</span>
                   </div>
                   <div className="flex items-start gap-2">
                     <CheckCircle size={15} className="text-green-600 shrink-0 mt-0.5" />
-                    <span><b>Evolução Histórica Mensal</b>: Curva flutuante demonstrando a redução ou aumento na taxa de erro nas placas que compõem o sistema estadual.</span>
+                    <span><b>Evolução Histórica Mensal</b>: Curva flutuante demonstrando a evolução de remessas e ensaios de toda a rede ou de um PAC específico.</span>
                   </div>
                 </div>
               </div>
