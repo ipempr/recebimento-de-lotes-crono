@@ -748,7 +748,8 @@ export default function NotificationsPanel({
       setTimeout(() => setNotificationSuccess(null), 3500);
     } catch (err: any) {
       console.error(err);
-      alert("Erro ao retificar notificação: " + err.message);
+      setNotificationSuccess("Erro ao retificar notificação: " + err.message);
+      setTimeout(() => setNotificationSuccess(null), 4000);
     } finally {
       setIsSavingNotification(false);
     }
@@ -772,7 +773,8 @@ export default function NotificationsPanel({
       }
     } catch (err: any) {
       console.error(err);
-      alert("Erro ao excluir notificação: " + err.message);
+      setNotificationSuccess("Erro ao excluir notificação: " + err.message);
+      setTimeout(() => setNotificationSuccess(null), 4000);
     }
   };
 
@@ -807,7 +809,8 @@ export default function NotificationsPanel({
       setTimeout(() => setNotificationSuccess(null), 3000);
     } catch (err: any) {
       console.error(err);
-      alert("Erro ao atualizar status da notificação: " + err.message);
+      setNotificationSuccess("Erro ao atualizar status da notificação: " + err.message);
+      setTimeout(() => setNotificationSuccess(null), 4000);
     }
   };
 
@@ -848,7 +851,8 @@ export default function NotificationsPanel({
       setViewingReceiptForNotif(updatedItem);
     } catch (err: any) {
       console.error(err);
-      alert("Erro ao registrar defesa: " + err.message);
+      setNotificationSuccess("Erro ao registrar defesa: " + err.message);
+      setTimeout(() => setNotificationSuccess(null), 4000);
     }
   };
 
@@ -895,14 +899,14 @@ export default function NotificationsPanel({
     const sectionsHTML = editableOficioSections.map(s => {
       const formattedContent = (s.content || '').replace(/\n/g, '<br/>');
       return `
-        <div class="section-item" style="display: flex; margin-bottom: 24px; font-family: sans-serif; page-break-inside: avoid; break-inside: avoid;">
+        <div class="section-item" style="display: flex; margin-bottom: 24px; font-family: sans-serif;">
           <div style="flex: 0 0 60px; text-align: center; border-right: 1px solid #e2e8f0; margin-right: 20px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 5px;">
             <div style="background-color: #f1f5f9; padding: 12px; border-radius: 12px; color: #475569; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: bold; border: 1px solid #e2e8f0;">
               ${getIconEmoji(s.icon)}
             </div>
             <div style="width: 2px; flex: 1; min-height: 20px; background-color: #f1f5f9; margin-top: 10px;"></div>
           </div>
-          <div style="flex: 1; padding: 16px 20px; background-color: #f8fafc; border-radius: 16px; border: 1px solid #f1f5f9;">
+          <div style="flex: 1; padding: 16px 20px; background-color: #f8fafc; border-radius: 16px; border: 1px solid #f1f5f9; word-break: break-word; overflow-wrap: anywhere;">
             <h4 style="margin: 0 0 8px 0; font-size: 12px; font-weight: 800; letter-spacing: 0.1em; color: #1e293b; text-transform: uppercase;">${s.title}</h4>
             <p style="margin: 0; font-size: 13px; font-weight: 400; line-height: 1.6; color: #475569;">${formattedContent}</p>
           </div>
@@ -935,13 +939,18 @@ export default function NotificationsPanel({
               body { 
                 margin: 2.2cm 1.8cm; 
                 -webkit-print-color-adjust: exact; 
+                print-color-adjust: exact;
                 padding-bottom: 50px; 
                 display: block !important;
               }
               .no-print { display: none !important; }
-              .section-item, .print-avoid-break, .target-box { 
+              .print-avoid-break, .target-box { 
                 page-break-inside: avoid !important; 
                 break-inside: avoid !important; 
+              }
+              .section-item {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
               }
               .header {
                 page-break-inside: avoid !important;
@@ -2916,7 +2925,8 @@ export default function NotificationsPanel({
                   onClick={() => {
                     const fullText = `COMPROVANTE DE ENTREGA DE DEFESA ADMINISTRATIVA\nNIT-DICOL-014 • IPEM-PR\n\nProtocolo: ${protocolNumber}\nInteressado: ${pacRazaoSocial}\nCNPJ/CPF: ${pacCNPJ}\nNotificação: #${viewingReceiptForNotif.id ? viewingReceiptForNotif.id.substring(0, 10).toUpperCase() : ''}\nData de Protocolo: ${formatDateTime(viewingReceiptForNotif.defenseReceivedAt || new Date())}\nChave de Validação: ${validationHash}\n\nTeor da Defesa:\n${viewingReceiptForNotif.defenseText}`;
                     navigator.clipboard.writeText(fullText);
-                    alert("Comprovante copiado para a área de transferência!");
+                    setNotificationSuccess("Comprovante copiado para a área de transferência!");
+                    setTimeout(() => setNotificationSuccess(null), 3000);
                   }}
                   className="px-4 py-2.5 bg-emerald-50 hover:bg-emerald-100 transition-colors text-emerald-800 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5"
                 >

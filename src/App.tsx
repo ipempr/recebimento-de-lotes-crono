@@ -194,6 +194,30 @@ function parseLocalTimestamp(raw: any): any {
   return LocalTimestamp.now();
 }
 
+function toSafeDate(ts: any): Date | null {
+  if (!ts) return null;
+  if (typeof ts.toDate === 'function') {
+    try {
+      const d = ts.toDate();
+      return d instanceof Date && !isNaN(d.getTime()) ? d : null;
+    } catch {
+      return null;
+    }
+  }
+  if (ts instanceof Date) {
+    return !isNaN(ts.getTime()) ? ts : null;
+  }
+  if (typeof ts === 'object' && typeof ts.seconds === 'number') {
+    const d = new Date(ts.seconds * 1000);
+    return !isNaN(d.getTime()) ? d : null;
+  }
+  if (typeof ts === 'string' || typeof ts === 'number') {
+    const d = new Date(ts);
+    return !isNaN(d.getTime()) ? d : null;
+  }
+  return null;
+}
+
 interface AuthErrorDetails {
   code: string;
   title: string;
@@ -1375,7 +1399,7 @@ export default function App() {
       if (!matchesSearch) return false;
 
       const isFinished = !!b.conferidoPor && b.conferidoPor.trim() !== '';
-      const periodoInicialDate = b.periodoInicial ? b.periodoInicial.toDate() : null;
+      const periodoInicialDate = toSafeDate(b.periodoInicial);
       const deadline = periodoInicialDate ? addDays(periodoInicialDate, 30) : null;
       const daysRemaining = deadline ? differenceInDays(deadline, now) : 0;
       const isOverdue = !isFinished && deadline ? isAfter(now, deadline) : false;
@@ -1391,7 +1415,7 @@ export default function App() {
       // Dashboard Period Filter
       const dateObj = isFinished 
         ? periodoInicialDate 
-        : (b.recebidoEm ? b.recebidoEm.toDate() : periodoInicialDate);
+        : (toSafeDate(b.recebidoEm) || periodoInicialDate);
 
       if (dateObj) {
         if (startDateObj && dateObj < startDateObj) return false;
@@ -1415,8 +1439,8 @@ export default function App() {
 
     batches.forEach(b => {
       const hasInformado = b.conferidoPor && b.conferidoPor.trim() !== '';
-      const periodoInicialDate = b.periodoInicial ? b.periodoInicial.toDate() : null;
-      const recebidoEmDate = b.recebidoEm ? b.recebidoEm.toDate() : null;
+      const periodoInicialDate = toSafeDate(b.periodoInicial);
+      const recebidoEmDate = toSafeDate(b.recebidoEm);
 
       if (hasInformado) {
         // Check if finished batch is within dashboard period filter (using periodoInicial)
@@ -1432,7 +1456,7 @@ export default function App() {
           // On time vs Late
           if (periodoInicialDate) {
             const deadline = addDays(periodoInicialDate, 30);
-            const conferidoEmDate = b.conferidoEm ? b.conferidoEm.toDate() : null;
+            const conferidoEmDate = toSafeDate(b.conferidoEm);
             if (conferidoEmDate && isAfter(conferidoEmDate, deadline)) {
               lateCount++;
             } else {
@@ -2104,7 +2128,7 @@ export default function App() {
             </div>
           </>
         ) : activeTab === 'stats' ? (
-          <StatsPanel batches={batches} collaborators={collaborators} pacs={pacs} nonConformityRecords={nonConformityRecords} isLocalMode={isLocalMode} />
+          <StatsPanel batches={batches} collaborators={collaborators} pacs={pacs} nonConformityRecords={nonConformityRecords} nonConformitiesConfigs={nonConformitiesConfigs} isLocalMode={isLocalMode} />
         ) : activeTab === 'notifications' ? (
           <NotificationsPanel 
             batches={batches}
@@ -2208,7 +2232,7 @@ export default function App() {
                 batchId = 'local-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9);
                 updated = [{ ...localBatch, id: batchId, nonConformities: batchNCs }, ...batches];
               }
-              updated.sort((a, b) => b.recebidoEm.toDate().getTime() - a.recebidoEm.toDate().getTime());
+              updated.sort((a, b) => (toSafeDate(b.recebidoEm)?.getTime() || 0) - (toSafeDate(a.recebidoEm)?.getTime() || 0));
               setBatches(updated);
               localStorage.setItem('lotes_batches', JSON.stringify(updated));
 
@@ -2312,12 +2336,19 @@ function ConfirmModal({ title, message, onConfirm, onCancel }: any) {
 }
 
 function BatchCard({ batch, onEdit, onDelete, canEdit = true, canDelete = true }: any) {
-  const formatDate = (ts?: Timestamp) => ts ? format(ts.toDate(), "dd/MM/yyyy HH:mm", { locale: ptBR }) : '-';
-  const formatPeriod = (ts: Timestamp) => format(ts.toDate(), "dd/MM/yyyy", { locale: ptBR });
+  const formatDate = (ts?: any) => {
+    const d = toSafeDate(ts);
+    return d ? format(d, "dd/MM/yyyy HH:mm", { locale: ptBR }) : '-';
+  };
+  const formatPeriod = (ts?: any) => {
+    const d = toSafeDate(ts);
+    return d ? format(d, "dd/MM/yyyy", { locale: ptBR }) : '-';
+  };
 
   // Deadline Logic
   const isFinished = !!batch.conferidoPor && batch.conferidoPor.trim() !== '';
-  const deadline = addDays(batch.periodoInicial.toDate(), 30);
+  const pInicialDate = toSafeDate(batch.periodoInicial) || new Date();
+  const deadline = addDays(pInicialDate, 30);
   const daysRemaining = differenceInDays(deadline, new Date());
   const isOverdue = !isFinished && isAfter(new Date(), deadline);
   const isWarning = !isFinished && !isOverdue && daysRemaining <= 10;
@@ -2406,8 +2437,9 @@ function BatchCard({ batch, onEdit, onDelete, canEdit = true, canDelete = true }
   );
 }
 
-function WorkflowStep({ label, user, date }: { label: string, user?: string, date?: Timestamp }) {
-  const isDone = !!user;
+function WorkflowStep({ label, user, date }: { label: string, user?: string, date?: any }) {
+  const isDone = !!user && user.trim() !== '';
+  const safeDate = toSafeDate(date);
   return (
     <div className={cn(
       "flex items-center gap-3 p-2 rounded-xl transition-colors",
@@ -2422,7 +2454,7 @@ function WorkflowStep({ label, user, date }: { label: string, user?: string, dat
       <div className="min-w-0">
         <p className="text-[10px] font-bold uppercase tracking-tight opacity-60">{label}</p>
         <p className="text-xs font-medium truncate">
-          {isDone ? `${user} • ${format(date!.toDate(), "dd/MM/yy")}` : 'Pendente'}
+          {isDone ? (safeDate ? `${user} • ${format(safeDate, "dd/MM/yy")}` : user) : 'Pendente'}
         </p>
       </div>
     </div>
@@ -2518,16 +2550,16 @@ function BatchModal({ isOpen, onClose, batch, pacs, collaborators, statuses, non
   const [localError, setLocalError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     pac: batch?.pac || '',
-    periodoInicial: batch?.periodoInicial ? format(batch.periodoInicial.toDate(), "yyyy-MM-dd") : '',
-    periodoFinal: batch?.periodoFinal ? format(batch.periodoFinal.toDate(), "yyyy-MM-dd") : '',
+    periodoInicial: toSafeDate(batch?.periodoInicial) ? format(toSafeDate(batch.periodoInicial)!, "yyyy-MM-dd") : '',
+    periodoFinal: toSafeDate(batch?.periodoFinal) ? format(toSafeDate(batch.periodoFinal)!, "yyyy-MM-dd") : '',
     numEnsaios: batch?.numEnsaios || 0,
     status: batch?.status || 'ABERTO', // Default to ABERTO
     recebidoPor: batch?.recebidoPor || '',
-    recebidoEmDate: batch?.recebidoEm ? format(batch.recebidoEm.toDate(), "yyyy-MM-dd") : (batch ? '' : format(new Date(), "yyyy-MM-dd")),
+    recebidoEmDate: toSafeDate(batch?.recebidoEm) ? format(toSafeDate(batch.recebidoEm)!, "yyyy-MM-dd") : (batch ? '' : format(new Date(), "yyyy-MM-dd")),
     lidoPor: batch?.lidoPor || '',
-    lidoEmDate: batch?.lidoEm ? format(batch.lidoEm.toDate(), "yyyy-MM-dd") : '',
+    lidoEmDate: toSafeDate(batch?.lidoEm) ? format(toSafeDate(batch.lidoEm)!, "yyyy-MM-dd") : '',
     conferidoPor: batch?.conferidoPor || '',
-    conferidoEmDate: batch?.conferidoEm ? format(batch.conferidoEm.toDate(), "yyyy-MM-dd") : '',
+    conferidoEmDate: toSafeDate(batch?.conferidoEm) ? format(toSafeDate(batch.conferidoEm)!, "yyyy-MM-dd") : '',
     ensaioForaDoPrazo: batch?.ensaioForaDoPrazo || false,
   });
 
@@ -3822,7 +3854,7 @@ function ConfigPanel({
           recebidoEm: parseLocalTimestamp(b.recebidoEm),
           lidoEm: parseLocalTimestamp(b.lidoEm),
           conferidoEm: parseLocalTimestamp(b.conferidoEm),
-          createdAt: Timestamp.now()
+          createdAt: LocalTimestamp.now()
         }));
         const updated = [...finalizedLocalBatches, ...batches];
         setBatches(updated);
@@ -5397,7 +5429,21 @@ function ConfigPanel({
 );
 }
 
-function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLocalMode }: { batches: any[]; collaborators: any[]; pacs: any[]; nonConformityRecords?: any[]; isLocalMode?: boolean }) {
+function StatsPanel({
+  batches,
+  collaborators,
+  pacs,
+  nonConformityRecords,
+  nonConformitiesConfigs,
+  isLocalMode
+}: {
+  batches: any[];
+  collaborators: any[];
+  pacs: any[];
+  nonConformityRecords?: any[];
+  nonConformitiesConfigs?: any[];
+  isLocalMode?: boolean;
+}) {
   // Default filter dates: last 30 days
   const defaultStatsStart = useMemo(() => format(addDays(new Date(), -30), 'yyyy-MM-dd'), []);
   const defaultStatsEnd = useMemo(() => format(new Date(), 'yyyy-MM-dd'), []);
@@ -5437,7 +5483,7 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
     batches.forEach(b => {
       // Recebido por
       if (b.recebidoPor && b.recebidoPor.trim() !== '') {
-        const rDate = b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null);
+        const rDate = toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
         if (rDate && (!startDate || rDate >= startDate) && (!endDate || startOfDay(rDate) <= endDate)) {
           list.push(b.recebidoPor.trim());
         }
@@ -5445,7 +5491,7 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
 
       // Lido por
       if (b.lidoPor && b.lidoPor.trim() !== '') {
-        const lDate = b.lidoEm ? b.lidoEm.toDate() : (b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null));
+        const lDate = toSafeDate(b.lidoEm) || toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
         if (lDate && (!startDate || lDate >= startDate) && (!endDate || startOfDay(lDate) <= endDate)) {
           list.push(b.lidoPor.trim());
         }
@@ -5453,7 +5499,7 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
 
       // Informado por (conferidoPor)
       if (b.conferidoPor && b.conferidoPor.trim() !== '') {
-        const cDate = b.conferidoEm ? b.conferidoEm.toDate() : (b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null));
+        const cDate = toSafeDate(b.conferidoEm) || toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
         if (cDate && (!startDate || cDate >= startDate) && (!endDate || startOfDay(cDate) <= endDate)) {
           list.push(b.conferidoPor.trim());
         }
@@ -5464,107 +5510,272 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
 
   // Compute stats on batches using individual activity insertion dates
   // (recebidoPor uses recebidoEm, lidoPor uses lidoEm, conferidoPor uses conferidoEm)
+  // Activity weights: Recebidos = 3% (0.03), Lidos = 27% (0.27), Informados = 70% (0.70)
+  const WEIGHT_RECEBIDO = 0.03;
+  const WEIGHT_LIDO = 0.27;
+  const WEIGHT_INFORMADO = 0.70;
+
   const computedStats = useMemo(() => {
-    const productivity: Record<string, { recebido: number; lido: number; informado: number; total: number }> = {};
+    const productivity: Record<string, {
+      recebido: number;
+      lotesRecebido: number;
+      lido: number;
+      lotesLido: number;
+      informado: number;
+      lotesInformado: number;
+      total: number;
+      totalLotes: number;
+      weightedTotal: number;
+      leadTimeSum: number;
+      leadTimeCount: number;
+    }> = {};
     
     let onTimeCount = 0;
     let lateCount = 0;
     let totalEnsaiosFinished = 0;
     let totalEnsaiosOpen = 0;
 
+    // Executive KPI accumulators
+    let totalEnsaiosReceivedPeriod = 0;
+    let totalBatchesReceivedPeriod = 0;
+    let totalEnsaiosLidoPeriod = 0;
+    let totalBatchesLidoPeriod = 0;
+    let totalBatchesFinishedPeriod = 0;
+
+    // Team-wide weighted total (unfiltered by selectedCollab so single-collab filter still shows real team share %)
+    let teamTotalWeightedPeriod = 0;
+
+    let readLeadTimeDaysSum = 0;
+    let readLeadTimeCount = 0;
+    let closeLeadTimeDaysSum = 0;
+    let closeLeadTimeCount = 0;
+    let totalCycleDaysSum = 0;
+    let totalCycleCount = 0;
+
+    // Funnel counters
+    let awaitingReadBatches = 0;
+    let awaitingReadEnsaios = 0;
+    let awaitingInformBatches = 0;
+    let awaitingInformEnsaios = 0;
+
     const startDate = statsStartDate ? startOfDay(parseLocalDate(statsStartDate)) : null;
     const endDate = statsEndDate ? startOfDay(parseLocalDate(statsEndDate)) : null;
 
+    // NC map by batch ID for Top NC Pareto
+    const ncMapByBatch = new Map<string, any[]>();
+    (nonConformityRecords || []).forEach((nc: any) => {
+      if (nc.recebimento_lote_id) {
+        const list = ncMapByBatch.get(nc.recebimento_lote_id) || [];
+        list.push(nc);
+        ncMapByBatch.set(nc.recebimento_lote_id, list);
+      }
+    });
+    const ncReasonCounts: Record<string, { name: string; occurrences: number; platesCount: number }> = {};
+
+    const ensureCollab = (name: string) => {
+      if (!productivity[name]) {
+        productivity[name] = {
+          recebido: 0,
+          lotesRecebido: 0,
+          lido: 0,
+          lotesLido: 0,
+          informado: 0,
+          lotesInformado: 0,
+          total: 0,
+          totalLotes: 0,
+          weightedTotal: 0,
+          leadTimeSum: 0,
+          leadTimeCount: 0
+        };
+      }
+    };
+
     batches.forEach(b => {
       const ensaios = Number(b.numEnsaios) || 0;
+      const rDate = toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
+      const lDate = toSafeDate(b.lidoEm) || toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
+      const cDate = toSafeDate(b.conferidoEm) || toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
 
-      // 1. Recebido Por: date of insertion is b.recebidoEm
-      if (b.recebidoPor && b.recebidoPor.trim() !== '') {
+      const hasRecebido = Boolean(b.recebidoPor && b.recebidoPor.trim() !== '');
+      const hasLido = Boolean(b.lidoPor && b.lidoPor.trim() !== '');
+      const hasInformado = Boolean(b.conferidoPor && b.conferidoPor.trim() !== '');
+
+      const rInRange = Boolean(rDate && (!startDate || rDate >= startDate) && (!endDate || startOfDay(rDate) <= endDate));
+      const lInRange = Boolean(lDate && (!startDate || lDate >= startDate) && (!endDate || startOfDay(lDate) <= endDate));
+      const cInRange = Boolean(cDate && (!startDate || cDate >= startDate) && (!endDate || startOfDay(cDate) <= endDate));
+
+      // 1. Recebido Por: date of insertion is b.recebidoEm (Weight: 3%)
+      if (hasRecebido && rInRange) {
         const rName = b.recebidoPor.trim();
-        const rDate = b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null);
-        const rInRange = rDate && (!startDate || rDate >= startDate) && (!endDate || startOfDay(rDate) <= endDate);
+        teamTotalWeightedPeriod += ensaios * WEIGHT_RECEBIDO;
+        if (!selectedCollab || rName === selectedCollab) {
+          ensureCollab(rName);
+          productivity[rName].recebido += ensaios;
+          productivity[rName].lotesRecebido += 1;
+          productivity[rName].total += ensaios;
+          productivity[rName].totalLotes += 1;
+          productivity[rName].weightedTotal += ensaios * WEIGHT_RECEBIDO;
 
-        if (rInRange) {
-          if (!selectedCollab || rName === selectedCollab) {
-            if (!productivity[rName]) {
-              productivity[rName] = { recebido: 0, lido: 0, informado: 0, total: 0 };
-            }
-            productivity[rName].recebido += ensaios;
-            productivity[rName].total += ensaios;
-          }
+          totalEnsaiosReceivedPeriod += ensaios;
+          totalBatchesReceivedPeriod += 1;
         }
       }
 
-      // 2. Lido Por: date of insertion is b.lidoEm
-      if (b.lidoPor && b.lidoPor.trim() !== '') {
+      // 2. Lido Por: date of insertion is b.lidoEm (Weight: 27%)
+      if (hasLido && lInRange) {
         const lName = b.lidoPor.trim();
-        const lDate = b.lidoEm ? b.lidoEm.toDate() : (b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null));
-        const lInRange = lDate && (!startDate || lDate >= startDate) && (!endDate || startOfDay(lDate) <= endDate);
+        teamTotalWeightedPeriod += ensaios * WEIGHT_LIDO;
+        if (!selectedCollab || lName === selectedCollab) {
+          ensureCollab(lName);
+          productivity[lName].lido += ensaios;
+          productivity[lName].lotesLido += 1;
+          productivity[lName].total += ensaios;
+          productivity[lName].totalLotes += 1;
+          productivity[lName].weightedTotal += ensaios * WEIGHT_LIDO;
 
-        if (lInRange) {
-          if (!selectedCollab || lName === selectedCollab) {
-            if (!productivity[lName]) {
-              productivity[lName] = { recebido: 0, lido: 0, informado: 0, total: 0 };
-            }
-            productivity[lName].lido += ensaios;
-            productivity[lName].total += ensaios;
+          totalEnsaiosLidoPeriod += ensaios;
+          totalBatchesLidoPeriod += 1;
+
+          if (rDate && lDate) {
+            const diffRead = Math.max(0, differenceInDays(startOfDay(lDate), startOfDay(rDate)));
+            readLeadTimeDaysSum += diffRead;
+            readLeadTimeCount += 1;
+            productivity[lName].leadTimeSum += diffRead;
+            productivity[lName].leadTimeCount += 1;
           }
         }
       }
 
-      // 3. Informado Por: date of insertion is b.conferidoEm
-      if (b.conferidoPor && b.conferidoPor.trim() !== '') {
+      // 3. Informado Por: date of insertion is b.conferidoEm (Weight: 70%)
+      if (hasInformado && cInRange) {
         const cName = b.conferidoPor.trim();
-        const cDate = b.conferidoEm ? b.conferidoEm.toDate() : (b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null));
-        const cInRange = cDate && (!startDate || cDate >= startDate) && (!endDate || startOfDay(cDate) <= endDate);
+        teamTotalWeightedPeriod += ensaios * WEIGHT_INFORMADO;
+        if (!selectedCollab || cName === selectedCollab) {
+          ensureCollab(cName);
+          productivity[cName].informado += ensaios;
+          productivity[cName].lotesInformado += 1;
+          productivity[cName].total += ensaios;
+          productivity[cName].totalLotes += 1;
+          productivity[cName].weightedTotal += ensaios * WEIGHT_INFORMADO;
 
-        if (cInRange) {
-          if (!selectedCollab || cName === selectedCollab) {
-            if (!productivity[cName]) {
-              productivity[cName] = { recebido: 0, lido: 0, informado: 0, total: 0 };
-            }
-            productivity[cName].informado += ensaios;
-            productivity[cName].total += ensaios;
+          totalEnsaiosFinished += ensaios;
+          totalBatchesFinishedPeriod += 1;
 
-            // Delivery Quality (tracked for batches informed/concluded in this period)
-            totalEnsaiosFinished += ensaios;
-            const periodoInicialDate = b.periodoInicial ? b.periodoInicial.toDate() : null;
-            const deadline = periodoInicialDate ? addDays(periodoInicialDate, 30) : null;
-            const isLate = (deadline && isAfter(cDate, deadline)) || b.ensaioForaDoPrazo;
-            if (isLate) {
-              lateCount++;
-            } else {
-              onTimeCount++;
-            }
+          if (lDate && cDate) {
+            const diffClose = Math.max(0, differenceInDays(startOfDay(cDate), startOfDay(lDate)));
+            closeLeadTimeDaysSum += diffClose;
+            closeLeadTimeCount += 1;
+          }
+          if (rDate && cDate) {
+            const diffTotal = Math.max(0, differenceInDays(startOfDay(cDate), startOfDay(rDate)));
+            totalCycleDaysSum += diffTotal;
+            totalCycleCount += 1;
+            productivity[cName].leadTimeSum += diffTotal;
+            productivity[cName].leadTimeCount += 1;
+          }
+
+          // Delivery Quality (tracked for batches informed/concluded in this period)
+          const periodoInicialDate = toSafeDate(b.periodoInicial);
+          const deadline = periodoInicialDate ? addDays(periodoInicialDate, 30) : null;
+          const isLate = (deadline && cDate && isAfter(cDate, deadline)) || b.ensaioForaDoPrazo;
+          if (isLate) {
+            lateCount++;
+          } else {
+            onTimeCount++;
           }
         }
-      } else {
-        // Open batch (not informed yet)
-        const rDate = b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null);
-        const rInRange = rDate && (!startDate || rDate >= startDate) && (!endDate || startOfDay(rDate) <= endDate);
-        if (rInRange) {
-          if (!selectedCollab || (b.recebidoPor && b.recebidoPor.trim() === selectedCollab)) {
+      }
+
+      // Bottleneck / Funnel tracking for open batches in period
+      if (!hasInformado) {
+        if (hasLido && lInRange) {
+          if (!selectedCollab || b.lidoPor.trim() === selectedCollab) {
+            awaitingInformBatches += 1;
+            awaitingInformEnsaios += ensaios;
+            totalEnsaiosOpen += ensaios;
+          }
+        } else if (!hasLido && rInRange) {
+          if (!selectedCollab || (hasRecebido && b.recebidoPor.trim() === selectedCollab)) {
+            awaitingReadBatches += 1;
+            awaitingReadEnsaios += ensaios;
             totalEnsaiosOpen += ensaios;
           }
         }
       }
+
+      // Non-conformity Pareto tracking for batches active in the selected period
+      if (rInRange || lInRange || cInRange) {
+        const matchesCollabAny = !selectedCollab ||
+          (hasRecebido && b.recebidoPor.trim() === selectedCollab) ||
+          (hasLido && b.lidoPor.trim() === selectedCollab) ||
+          (hasInformado && b.conferidoPor.trim() === selectedCollab);
+
+        if (matchesCollabAny) {
+          const ncListLocal = b.nonConformities || [];
+          const ncListFirestore = ncMapByBatch.get(b.id) || [];
+          const batchNCs = ncListLocal.length > 0 ? ncListLocal : ncListFirestore;
+
+          batchNCs.forEach((nc: any) => {
+            const configObj = (nonConformitiesConfigs || []).find((c: any) => c.id === nc.nao_conformidade_id);
+            const reasonName = configObj?.name || nc.nao_conformidade_name || nc.nao_conformidade_id || 'Outro Enquadramento';
+            if (!ncReasonCounts[reasonName]) {
+              ncReasonCounts[reasonName] = { name: reasonName, occurrences: 0, platesCount: 0 };
+            }
+            ncReasonCounts[reasonName].occurrences += 1;
+            const platesLen = Array.isArray(nc.placas) ? nc.placas.length : 1;
+            ncReasonCounts[reasonName].platesCount += platesLen;
+          });
+        }
+      }
     });
 
+    // Sort collaborators primarily by weighted productivity score (3% Recebidos + 27% Lidos + 70% Informados)
     const productivityList = Object.entries(productivity).sort((a, b) => {
-      return a[0].localeCompare(b[0]);
+      return b[1].weightedTotal - a[1].weightedTotal || b[1].total - a[1].total || a[0].localeCompare(b[0]);
     });
+
+    const grandTotalProduced = productivityList.reduce((acc, [, d]) => acc + d.total, 0);
+    const grandTotalWeighted = productivityList.reduce((acc, [, d]) => acc + d.weightedTotal, 0);
+
+    const topNonConformities = Object.values(ncReasonCounts)
+      .sort((a, b) => b.platesCount - a.platesCount || b.occurrences - a.occurrences)
+      .slice(0, 4);
 
     const totalFinished = onTimeCount + lateCount;
+    const throughputRate = totalEnsaiosReceivedPeriod > 0
+      ? Math.round((totalEnsaiosFinished / totalEnsaiosReceivedPeriod) * 100)
+      : (totalEnsaiosFinished > 0 ? 100 : 0);
+
+    const avgReadDays = readLeadTimeCount > 0 ? (readLeadTimeDaysSum / readLeadTimeCount).toFixed(1) : '0.0';
+    const avgCloseDays = closeLeadTimeCount > 0 ? (closeLeadTimeDaysSum / closeLeadTimeCount).toFixed(1) : '0.0';
+    const avgTotalCycleDays = totalCycleCount > 0 ? (totalCycleDaysSum / totalCycleCount).toFixed(1) : '0.0';
 
     return {
       productivity: productivityList,
+      grandTotalProduced,
+      grandTotalWeighted,
+      teamTotalWeightedPeriod,
       onTimeCount,
       lateCount,
       totalFinished,
       totalEnsaiosFinished,
-      totalEnsaiosOpen
+      totalBatchesFinishedPeriod,
+      totalEnsaiosOpen,
+      totalEnsaiosReceivedPeriod,
+      totalBatchesReceivedPeriod,
+      totalEnsaiosLidoPeriod,
+      totalBatchesLidoPeriod,
+      throughputRate,
+      avgReadDays,
+      avgCloseDays,
+      avgTotalCycleDays,
+      awaitingReadBatches,
+      awaitingReadEnsaios,
+      awaitingInformBatches,
+      awaitingInformEnsaios,
+      topNonConformities
     };
-  }, [batches, selectedCollab, statsStartDate, statsEndDate]);
+  }, [batches, selectedCollab, statsStartDate, statsEndDate, nonConformityRecords, nonConformitiesConfigs]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-200">
@@ -5573,14 +5784,14 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#f5f5f0] pb-4">
             <div className="space-y-1">
-              <h3 className="text-sm font-bold uppercase tracking-wider text-[#5A5A40]">Filtros de Estatística</h3>
-              <p className="text-xs text-[#5A5A40]/60">Selecione o período de análise de produtividade e qualidade.</p>
+              <h3 className="text-sm font-bold uppercase tracking-wider text-[#5A5A40]">Filtros de Estatística & KPIs</h3>
+              <p className="text-xs text-[#5A5A40]/60">Selecione o período de análise de produtividade, SLA de tramitação e conformidade dos PACs.</p>
             </div>
             <div className="flex flex-wrap gap-1 bg-[#f5f5f0] p-1 rounded-xl">
               <button
                 onClick={() => setFilterPreset('30days')}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
                   filterPreset === '30days' ? "bg-white text-[#5A5A40] shadow-sm" : "text-[#5A5A40]/60 hover:text-[#5A5A40]"
                 )}
               >
@@ -5589,7 +5800,7 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
               <button
                 onClick={() => setFilterPreset('period')}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
                   filterPreset === 'period' ? "bg-white text-[#5A5A40] shadow-sm" : "text-[#5A5A40]/60 hover:text-[#5A5A40]"
                 )}
               >
@@ -5598,7 +5809,7 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
               <button
                 onClick={() => setFilterPreset('year')}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
                   filterPreset === 'year' ? "bg-white text-[#5A5A40] shadow-sm" : "text-[#5A5A40]/60 hover:text-[#5A5A40]"
                 )}
               >
@@ -5607,7 +5818,7 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
               <button
                 onClick={() => setFilterPreset('month')}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
                   filterPreset === 'month' ? "bg-white text-[#5A5A40] shadow-sm" : "text-[#5A5A40]/60 hover:text-[#5A5A40]"
                 )}
               >
@@ -5731,7 +5942,7 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
                   setSelectedYear(currentYear);
                   setSelectedMonth(new Date().getMonth());
                 }}
-                className="w-full lg:w-auto px-6 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition-all h-[44px] shrink-0"
+                className="w-full lg:w-auto px-6 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-xl transition-all h-[44px] shrink-0 cursor-pointer"
               >
                 Limpar Filtros
               </button>
@@ -5740,162 +5951,464 @@ function StatsPanel({ batches, collaborators, pacs, nonConformityRecords, isLoca
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Productivity by Collaborator x Activity */}
-        <div className="lg:col-span-2 bg-white rounded-[32px] p-8 border border-[#e5e5e0]">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-6">
-            <div className="flex items-center gap-3">
-              <BarChart3 className="text-[#5A5A40]" size={24} />
-              <div>
-                <h3 className="text-xl font-display font-bold tracking-tight">Produtividade por Atividade</h3>
-                <p className="text-xs text-[#5A5A40]/70 mt-0.5">
-                  Apuração baseada na data de inserção de cada colaborador (Recebido em, Lido em e Informado em).
-                </p>
-              </div>
+      {/* 1. FAIXA EXECUTIVA DE KPIS DA OPERAÇÃO */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* KPI 1: Taxa de Vazão (Throughput) */}
+        <div className="bg-white p-6 rounded-[28px] border border-[#e5e5e0] shadow-xs flex flex-col justify-between">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#5A5A40]/70">Taxa de Vazão (Período)</span>
+            <div className={cn(
+              "p-2 rounded-xl",
+              computedStats.throughputRate >= 90 ? "bg-emerald-50 text-emerald-700" : computedStats.throughputRate >= 70 ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-700"
+            )}>
+              <TrendingUp size={18} />
             </div>
-            {selectedCollab && (
-              <span className="text-xs font-bold text-gray-500 bg-gray-100 px-3 py-1.5 rounded-xl self-start sm:self-auto">
-                Filtrado: <strong className="text-gray-900">{selectedCollab}</strong>
-              </span>
-            )}
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left">
-              <thead>
-                <tr className="text-[10px] uppercase font-bold text-[#5A5A40] opacity-50 border-b border-[#e5e5e0]">
-                  <th className="pb-4">Colaborador</th>
-                  <th className="pb-4 text-center">Ensaios Recebidos</th>
-                  <th className="pb-4 text-center">Ensaios Lidos</th>
-                  <th className="pb-4 text-center">Ensaios Informados</th>
-                  <th className="pb-4 text-center">Total Produzido</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#f5f5f0]">
-                {computedStats.productivity.map(([name, data]: [string, any]) => (
-                  <tr key={name} className="group hover:bg-[#f5f5f0]/50 transition-colors">
-                    <td className="py-4 font-semibold text-gray-900 text-sm">{name}</td>
-                    <td className="py-4 text-center">
-                      <span className="px-2.5 py-1 bg-amber-50 text-amber-800 rounded-lg text-xs font-bold">
-                        {data.recebido || 0}
-                      </span>
-                    </td>
-                    <td className="py-4 text-center">
-                      <span className="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-bold">
-                        {data.lido || 0}
-                      </span>
-                    </td>
-                    <td className="py-4 text-center">
-                      <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold">
-                        {data.informado || 0}
-                      </span>
-                    </td>
-                    <td className="py-4 text-center">
-                      <span className="px-2.5 py-1 bg-[#5A5A40]/10 text-[#5A5A40] rounded-lg text-xs font-extrabold">
-                        {data.total || 0}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {computedStats.productivity.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="py-8 text-center text-sm text-[#5A5A40] opacity-60 italic">
-                      Nenhuma atividade registrada para este período / filtro.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-3xl font-display font-bold text-gray-900">{computedStats.throughputRate}%</span>
+              <span className={cn(
+                "text-[10px] font-bold px-2 py-0.5 rounded-full uppercase",
+                computedStats.throughputRate >= 100 ? "bg-emerald-100 text-emerald-800" : computedStats.throughputRate >= 80 ? "bg-blue-100 text-blue-800" : "bg-amber-100 text-amber-800"
+              )}>
+                {computedStats.throughputRate >= 100 ? 'Fila Reduzindo' : 'Em Fluxo'}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 mt-1.5">
+              <strong className="text-gray-800">{computedStats.totalEnsaiosFinished.toLocaleString('pt-BR')}</strong> informados de <strong className="text-gray-800">{computedStats.totalEnsaiosReceivedPeriod.toLocaleString('pt-BR')}</strong> recebidos
+            </p>
           </div>
         </div>
 
-        {/* Resolution Quality */}
-        <div className="bg-white rounded-[32px] p-8 border border-[#e5e5e0]">
-          <div className="flex items-center gap-3 mb-6">
-            <History className="text-[#5A5A40]" size={24} />
-            <h3 className="text-xl font-display font-bold tracking-tight">Qualidade de Entrega</h3>
+        {/* KPI 2: Tempo Médio até Leitura */}
+        <div className="bg-white p-6 rounded-[28px] border border-[#e5e5e0] shadow-xs flex flex-col justify-between">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#5A5A40]/70">SLA: Recebido → Lido</span>
+            <div className="p-2 rounded-xl bg-blue-50 text-blue-700">
+              <Clock size={18} />
+            </div>
           </div>
-          <div className="flex flex-col items-center justify-center h-48">
-            <div className="relative w-32 h-32">
-              <svg className="w-full h-full" viewBox="0 0 36 36">
-                <path
-                  className="text-red-100 stroke-current"
-                  strokeWidth="3"
-                  fill="none"
-                  d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                />
-                <path
-                  className="text-emerald-500 stroke-current"
-                  strokeWidth="3"
-                  strokeDasharray={`${computedStats.totalFinished > 0 ? (computedStats.onTimeCount / computedStats.totalFinished) * 100 : 0}, 100`}
-                  strokeLinecap="round"
-                  fill="none"
-                  d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                />
-              </svg>
-              <div className="absolute inset-0 flex items-center justify-center flex-col">
-                <span className="text-2xl font-bold">
-                  {computedStats.totalFinished > 0 ? Math.round((computedStats.onTimeCount / computedStats.totalFinished) * 100) : 0}%
-                </span>
-                <span className="text-[10px] uppercase font-bold opacity-50">No Prazo</span>
-              </div>
+          <div>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-3xl font-display font-bold text-gray-900">{computedStats.avgReadDays}</span>
+              <span className="text-xs font-bold text-gray-500">dias em média</span>
             </div>
-            <div className="mt-6 flex gap-8 text-sm font-medium">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 bg-emerald-500 rounded-full" />
-                <span>No Prazo: {computedStats.onTimeCount}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 bg-red-400 rounded-full" />
-                <span>Atrasados: {computedStats.lateCount}</span>
-              </div>
+            <p className="text-xs text-gray-500 mt-1.5">
+              Tempo de espera até a leitura ({computedStats.totalBatchesLidoPeriod} {computedStats.totalBatchesLidoPeriod === 1 ? 'lote lido' : 'lotes lidos'})
+            </p>
+          </div>
+        </div>
+
+        {/* KPI 3: Tempo Médio de Fechamento */}
+        <div className="bg-white p-6 rounded-[28px] border border-[#e5e5e0] shadow-xs flex flex-col justify-between">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#5A5A40]/70">SLA: Lido → Informado</span>
+            <div className="p-2 rounded-xl bg-emerald-50 text-emerald-700">
+              <CheckCircle2 size={18} />
             </div>
+          </div>
+          <div>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-3xl font-display font-bold text-gray-900">{computedStats.avgCloseDays}</span>
+              <span className="text-xs font-bold text-gray-500">dias em média</span>
+            </div>
+            <p className="text-xs text-gray-500 mt-1.5">
+              Ciclo total (Recebido → Informado): <strong className="text-emerald-800">{computedStats.avgTotalCycleDays} dias</strong>
+            </p>
+          </div>
+        </div>
+
+        {/* KPI 4: Gargalo Atual (Aguardando Fechamento) */}
+        <div className="bg-white p-6 rounded-[28px] border border-[#e5e5e0] shadow-xs flex flex-col justify-between">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#5A5A40]/70">Pendências de Fluxo</span>
+            <div className={cn(
+              "p-2 rounded-xl",
+              computedStats.awaitingInformBatches > 0 ? "bg-amber-50 text-amber-700" : "bg-gray-100 text-gray-500"
+            )}>
+              <AlertTriangle size={18} />
+            </div>
+          </div>
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-3xl font-display font-bold text-gray-900">
+                {(computedStats.awaitingReadBatches + computedStats.awaitingInformBatches)}
+              </span>
+              <span className="text-xs font-bold text-gray-500">lotes pendentes</span>
+            </div>
+            <p className="text-xs text-gray-500 mt-1.5">
+              <strong className="text-amber-700">{computedStats.awaitingReadBatches}</strong> s/ leitura • <strong className="text-blue-700">{computedStats.awaitingInformBatches}</strong> lidos s/ informar
+            </p>
           </div>
         </div>
       </div>
 
-      {/* Seção de Conformidade dos PACs (Sem Não Conformidades ou Atrasos) */}
-      <PacComplianceSection
+      {/* 2. BLOCO CENTRAL: PRODUTIVIDADE POR COLABORADOR (2/3) + SAÚDE DO FLUXO & SLA (1/3) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Productivity by Collaborator x Activity */}
+        <div className="lg:col-span-2 bg-white rounded-[32px] p-8 border border-[#e5e5e0] flex flex-col justify-between">
+          <div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-3">
+                <BarChart3 className="text-[#5A5A40]" size={24} />
+                <div>
+                  <h3 className="text-xl font-display font-bold tracking-tight">Produtividade por Atividade</h3>
+                  <p className="text-xs text-[#5A5A40]/70 mt-0.5">
+                    Apuração ponderada por complexidade da etapa (Recebidos: 3%, Lidos: 27%, Informados: 70%) pelas datas de inserção.
+                  </p>
+                </div>
+              </div>
+              {selectedCollab && (
+                <button
+                  onClick={() => setSelectedCollab('')}
+                  className="text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-xl self-start sm:self-auto flex items-center gap-1.5 cursor-pointer"
+                >
+                  <span>Filtrado: <strong className="text-gray-900">{selectedCollab}</strong></span>
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+
+            {/* Faixa de Pesos de Avaliação por Etapa */}
+            <div className="mb-5 p-3 bg-[#f9f9f6] border border-[#e5e5e0] rounded-2xl flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-bold text-[#5A5A40] uppercase tracking-wider text-[10px]">
+                Pesos na Participação:
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200/80 text-amber-900 font-bold text-[11px]">
+                  Recebidos: 3%
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200/80 text-blue-900 font-bold text-[11px]">
+                  Lidos: 27%
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200/80 text-emerald-900 font-bold text-[11px]">
+                  Informados: 70%
+                </span>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="text-[10px] uppercase font-bold text-[#5A5A40] opacity-70 border-b border-[#e5e5e0]">
+                    <th className="pb-4">Colaborador</th>
+                    <th className="pb-4 text-center">
+                      Recebidos
+                      <span className="block text-[9px] text-amber-700 font-extrabold">Peso 3%</span>
+                    </th>
+                    <th className="pb-4 text-center">
+                      Lidos
+                      <span className="block text-[9px] text-blue-700 font-extrabold">Peso 27%</span>
+                    </th>
+                    <th className="pb-4 text-center">
+                      Informados
+                      <span className="block text-[9px] text-emerald-700 font-extrabold">Peso 70%</span>
+                    </th>
+                    <th className="pb-4 text-center">
+                      Score Ponderado
+                      <span className="block text-[9px] text-[#5A5A40] font-normal lowercase">(bruto / lotes)</span>
+                    </th>
+                    <th className="pb-4 text-right">
+                      Participação
+                      <span className="block text-[9px] text-[#5A5A40] font-normal lowercase">(ponderada)</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#f5f5f0]">
+                  {computedStats.productivity.map(([name, data]: [string, any]) => {
+                    const denominator = computedStats.teamTotalWeightedPeriod > 0
+                      ? computedStats.teamTotalWeightedPeriod
+                      : computedStats.grandTotalWeighted;
+                    const rawShare = denominator > 0
+                      ? (data.weightedTotal / denominator) * 100
+                      : 0;
+                    const shareFormatted = rawShare.toLocaleString('pt-BR', {
+                      minimumFractionDigits: 1,
+                      maximumFractionDigits: 1
+                    });
+                    const avgCollabDays = data.leadTimeCount > 0
+                      ? (data.leadTimeSum / data.leadTimeCount).toFixed(1)
+                      : null;
+
+                    const ptsRecebido = (data.recebido || 0) * WEIGHT_RECEBIDO;
+                    const ptsLido = (data.lido || 0) * WEIGHT_LIDO;
+                    const ptsInformado = (data.informado || 0) * WEIGHT_INFORMADO;
+
+                    return (
+                      <tr
+                        key={name}
+                        onClick={() => setSelectedCollab(selectedCollab === name ? '' : name)}
+                        title="Clique para filtrar este colaborador"
+                        className={cn(
+                          "group hover:bg-[#f5f5f0]/60 transition-colors cursor-pointer",
+                          selectedCollab === name && "bg-[#f5f5f0]"
+                        )}
+                      >
+                        <td className="py-4 pr-2">
+                          <div className="font-bold text-gray-900 text-sm">{name}</div>
+                          {avgCollabDays !== null && (
+                            <span className="text-[10px] text-gray-400 font-medium block">
+                              Média: {avgCollabDays}d por lote
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-4 text-center">
+                          <span className="px-2.5 py-1 bg-amber-50 text-amber-800 rounded-lg text-xs font-bold inline-block">
+                            {(data.recebido || 0).toLocaleString('pt-BR')}
+                          </span>
+                          <span className="block text-[10px] text-gray-400 mt-0.5 font-medium">
+                            {data.lotesRecebido || 0} {data.lotesRecebido === 1 ? 'lote' : 'lotes'} • {ptsRecebido.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                          </span>
+                        </td>
+                        <td className="py-4 text-center">
+                          <span className="px-2.5 py-1 bg-blue-50 text-blue-700 rounded-lg text-xs font-bold inline-block">
+                            {(data.lido || 0).toLocaleString('pt-BR')}
+                          </span>
+                          <span className="block text-[10px] text-gray-400 mt-0.5 font-medium">
+                            {data.lotesLido || 0} {data.lotesLido === 1 ? 'lote' : 'lotes'} • {ptsLido.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                          </span>
+                        </td>
+                        <td className="py-4 text-center">
+                          <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold inline-block">
+                            {(data.informado || 0).toLocaleString('pt-BR')}
+                          </span>
+                          <span className="block text-[10px] text-gray-400 mt-0.5 font-medium">
+                            {data.lotesInformado || 0} {data.lotesInformado === 1 ? 'lote' : 'lotes'} • {ptsInformado.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                          </span>
+                        </td>
+                        <td className="py-4 text-center">
+                          <span className="px-2.5 py-1 bg-[#5A5A40]/10 text-[#5A5A40] rounded-lg text-xs font-extrabold inline-block">
+                            {data.weightedTotal.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                          </span>
+                          <span className="block text-[10px] text-gray-400 mt-0.5 font-medium">
+                            Bruto: {(data.total || 0).toLocaleString('pt-BR')} ({data.totalLotes || 0} ações)
+                          </span>
+                        </td>
+                        <td className="py-4 pl-2 text-right min-w-[115px]">
+                          <div className="flex items-center justify-end gap-2">
+                            <span className="text-xs font-extrabold text-gray-800">{shareFormatted}%</span>
+                          </div>
+                          <div className="w-full bg-gray-100 h-1.5 rounded-full overflow-hidden mt-1">
+                            <div
+                              className="bg-[#5A5A40] h-full rounded-full transition-all duration-300"
+                              style={{ width: `${Math.min(100, rawShare)}%` }}
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {computedStats.productivity.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="py-10 text-center text-sm text-[#5A5A40] opacity-60 italic">
+                        Nenhuma atividade registrada para este período / filtro.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+                {computedStats.productivity.length > 1 && (
+                  <tfoot>
+                    <tr className="border-t-2 border-[#e5e5e0] bg-[#fcfbf9] text-xs font-bold text-gray-900">
+                      <td className="py-3.5 pl-2 uppercase text-[10px] tracking-wider text-[#5A5A40]">
+                        Total da Equipe ({computedStats.productivity.length})
+                      </td>
+                      <td className="py-3.5 text-center text-amber-900">
+                        {computedStats.totalEnsaiosReceivedPeriod.toLocaleString('pt-BR')}
+                        <span className="block text-[9px] font-normal text-gray-500">
+                          {computedStats.totalBatchesReceivedPeriod} lotes • {(computedStats.totalEnsaiosReceivedPeriod * WEIGHT_RECEBIDO).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                        </span>
+                      </td>
+                      <td className="py-3.5 text-center text-blue-900">
+                        {computedStats.totalEnsaiosLidoPeriod.toLocaleString('pt-BR')}
+                        <span className="block text-[9px] font-normal text-gray-500">
+                          {computedStats.totalBatchesLidoPeriod} lotes • {(computedStats.totalEnsaiosLidoPeriod * WEIGHT_LIDO).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                        </span>
+                      </td>
+                      <td className="py-3.5 text-center text-emerald-900">
+                        {computedStats.totalEnsaiosFinished.toLocaleString('pt-BR')}
+                        <span className="block text-[9px] font-normal text-gray-500">
+                          {computedStats.totalBatchesFinishedPeriod} lotes • {(computedStats.totalEnsaiosFinished * WEIGHT_INFORMADO).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                        </span>
+                      </td>
+                      <td className="py-3.5 text-center text-[#5A5A40]">
+                        {computedStats.grandTotalWeighted.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} pts
+                        <span className="block text-[9px] font-normal text-gray-500">
+                          Bruto: {computedStats.grandTotalProduced.toLocaleString('pt-BR')}
+                        </span>
+                      </td>
+                      <td className="py-3.5 pr-2 text-right text-[#5A5A40]">100,0%</td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-gray-400">
+            <span>💡 Dica: Clique no nome de um colaborador na tabela para filtrar seus indicadores.</span>
+            <span>Fórmula: (Recebidos × 0,03) + (Lidos × 0,27) + (Informados × 0,70)</span>
+          </div>
+        </div>
+
+        {/* Painel Substituto: Saúde do Fluxo, SLA & Top Não-Conformidades */}
+        <div className="bg-white rounded-[32px] p-8 border border-[#e5e5e0] flex flex-col justify-between space-y-6">
+          {/* Sub-bloco 1: Funil de Tramitação de Lotes */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2.5">
+              <History className="text-[#5A5A40]" size={22} />
+              <div>
+                <h3 className="text-lg font-display font-bold tracking-tight text-gray-900">Saúde do Fluxo & SLA</h3>
+                <p className="text-[11px] text-[#5A5A40]/70">Situação dos lotes movimentados no período</p>
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              {/* Etapa 1: Aguardando Leitura */}
+              <div className="p-3 rounded-2xl bg-amber-50/60 border border-amber-200/70 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                  <div>
+                    <span className="text-xs font-bold text-amber-950 block">Aguardando Leitura</span>
+                    <span className="text-[10px] text-amber-800/80">Recebidos, mas sem leitor</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="text-sm font-extrabold text-amber-900">{computedStats.awaitingReadBatches} lotes</span>
+                  <span className="block text-[10px] text-amber-700 font-medium">{computedStats.awaitingReadEnsaios.toLocaleString('pt-BR')} ensaios</span>
+                </div>
+              </div>
+
+              {/* Etapa 2: Aguardando Informação */}
+              <div className="p-3 rounded-2xl bg-blue-50/60 border border-blue-200/70 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                  <div>
+                    <span className="text-xs font-bold text-blue-950 block">Aguardando Informação</span>
+                    <span className="text-[10px] text-blue-800/80">Lidos, pendentes de baixa</span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="text-sm font-extrabold text-blue-900">{computedStats.awaitingInformBatches} lotes</span>
+                  <span className="block text-[10px] text-blue-700 font-medium">{computedStats.awaitingInformEnsaios.toLocaleString('pt-BR')} ensaios</span>
+                </div>
+              </div>
+
+              {/* Etapa 3: Finalizados (No Prazo vs Atrasados) */}
+              <div className="p-3.5 rounded-2xl bg-emerald-50/60 border border-emerald-200/70 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                    <div>
+                      <span className="text-xs font-bold text-emerald-950 block">Concluídos / Informados</span>
+                      <span className="text-[10px] text-emerald-800/80">
+                        {computedStats.totalFinished > 0 ? Math.round((computedStats.onTimeCount / computedStats.totalFinished) * 100) : 100}% entregues dentro do prazo (30d)
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-sm font-extrabold text-emerald-900">{computedStats.totalFinished} lotes</span>
+                    <span className="block text-[10px] text-emerald-700 font-medium">{computedStats.totalEnsaiosFinished.toLocaleString('pt-BR')} ensaios</span>
+                  </div>
+                </div>
+
+                {/* Barra de proporção No Prazo vs Atrasado */}
+                <div className="w-full h-2 bg-red-200 rounded-full overflow-hidden flex">
+                  <div
+                    className="bg-emerald-500 h-full transition-all duration-300"
+                    style={{
+                      width: `${computedStats.totalFinished > 0 ? (computedStats.onTimeCount / computedStats.totalFinished) * 100 : 100}%`
+                    }}
+                  />
+                </div>
+                <div className="flex justify-between text-[10px] font-bold pt-0.5">
+                  <span className="text-emerald-800">✓ No Prazo: {computedStats.onTimeCount}</span>
+                  <span className="text-red-700">⚠ Com Atraso: {computedStats.lateCount}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Sub-bloco 2: Top Motivos de Não-Conformidades no Período */}
+          <div className="pt-5 border-t border-[#f5f5f0] space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold uppercase tracking-wider text-[#5A5A40]">
+                Principais Não-Conformidades
+              </span>
+              <span className="text-[10px] font-semibold text-gray-400">No período</span>
+            </div>
+
+            {computedStats.topNonConformities.length > 0 ? (
+              <div className="space-y-2">
+                {computedStats.topNonConformities.map((nc, idx) => (
+                  <div key={nc.name} className="p-2.5 rounded-xl bg-[#f9f9f6] border border-[#e5e5e0] flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-5 h-5 rounded-full bg-red-100 text-red-800 text-[10px] font-extrabold flex items-center justify-center shrink-0">
+                        {idx + 1}
+                      </span>
+                      <span className="text-xs font-medium text-gray-800 truncate" title={nc.name}>
+                        {nc.name}
+                      </span>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <span className="text-xs font-bold text-red-700 bg-red-50 px-2 py-0.5 rounded-md">
+                        {nc.platesCount} {nc.platesCount === 1 ? 'placa' : 'placas'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="p-4 rounded-2xl bg-gray-50 border border-dashed border-gray-200 text-center text-xs text-gray-400 italic">
+                Nenhuma não-conformidade apontada nos lotes deste período.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 3. CENTRAL UNIFICADA DE DESEMPENHO, VOLUME E CONFORMIDADE POR PAC */}
+      <PacUnifiedAnalyticsSection
         batches={batches}
         pacs={pacs}
         nonConformityRecords={nonConformityRecords}
         statsStartDate={statsStartDate}
         statsEndDate={statsEndDate}
-      />
-
-      {/* Seção de Produtividade por PAC */}
-      <PacProductivitySection 
-        batches={batches} 
-        pacs={pacs} 
-        statsStartDate={statsStartDate} 
-        statsEndDate={statsEndDate} 
-        defaultStatsStart={defaultStatsStart} 
-        defaultStatsEnd={defaultStatsEnd} 
+        defaultStatsStart={defaultStatsStart}
+        defaultStatsEnd={defaultStatsEnd}
       />
     </div>
   );
 }
 
-interface PacComplianceSectionProps {
+interface PacUnifiedAnalyticsSectionProps {
   batches: any[];
   pacs: any[];
   nonConformityRecords?: any[];
   statsStartDate: string;
   statsEndDate: string;
+  defaultStatsStart: string;
+  defaultStatsEnd: string;
 }
 
-function PacComplianceSection({
+function PacUnifiedAnalyticsSection({
   batches,
   pacs,
   nonConformityRecords = [],
   statsStartDate,
-  statsEndDate
-}: PacComplianceSectionProps) {
-  const [complianceTab, setComplianceTab] = useState<'compliant' | 'nonCompliant' | 'all'>('compliant');
+  statsEndDate,
+  defaultStatsStart,
+  defaultStatsEnd
+}: PacUnifiedAnalyticsSectionProps) {
+  const [viewMode, setViewMode] = useState<'ranking' | 'evolution'>('ranking');
+  const [complianceTab, setComplianceTab] = useState<'all' | 'compliant' | 'nonCompliant'>('all');
+  const [pacSortOrder, setPacSortOrder] = useState<'ensaios_desc' | 'nc_desc' | 'alphabetical'>('ensaios_desc');
   const [searchTerm, setSearchTerm] = useState('');
   const [copied, setCopied] = useState(false);
   const [selectedPacForModal, setSelectedPacForModal] = useState<any | null>(null);
+  const [selectedPacEvolution, setSelectedPacEvolution] = useState<string>('all');
 
-  // Compute compliance per PAC in the selected period
+  // Compute complete metrics per PAC in the selected period
   const pacMetrics = useMemo(() => {
     const configPacNames = (pacs || []).map((p: any) => p.name || p.id).filter(Boolean);
     const batchPacNames = (batches || []).map((b: any) => b.pac).filter(Boolean);
@@ -5904,7 +6417,7 @@ function PacComplianceSection({
     const startDate = statsStartDate ? startOfDay(parseLocalDate(statsStartDate)) : null;
     const endDate = statsEndDate ? startOfDay(parseLocalDate(statsEndDate)) : null;
 
-    // Build NC Map by batch ID once to avoid repeated array filtering
+    // Build NC Map by batch ID once
     const ncMapByBatch = new Map<string, any[]>();
     (nonConformityRecords || []).forEach((nc: any) => {
       if (nc.recebimento_lote_id) {
@@ -5914,9 +6427,9 @@ function PacComplianceSection({
       }
     });
 
-    // Filter batches belonging to the selected statistics period
+    // Filter batches belonging to the selected statistics period (by recebidoEm)
     const periodBatches = batches.filter(b => {
-      const dateObj = b.recebidoEm ? b.recebidoEm.toDate() : (b.periodoInicial ? b.periodoInicial.toDate() : null);
+      const dateObj = toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
       if (!dateObj) return false;
       if (startDate && dateObj < startDate) return false;
       if (endDate && startOfDay(dateObj) > endDate) return false;
@@ -5930,10 +6443,11 @@ function PacComplianceSection({
       let totalEnsaios = 0;
 
       let ncCount = 0;
+      let ncPlatesCount = 0;
       let delayCount = 0;
 
       pacBatches.forEach(b => {
-        const numEns = b.numEnsaios || 0;
+        const numEns = Number(b.numEnsaios) || 0;
         totalEnsaios += numEns;
 
         const isFinished = (b.conferidoPor && b.conferidoPor.trim() !== '') || b.status === 'FINALIZADO';
@@ -5941,18 +6455,22 @@ function PacComplianceSection({
           totalEnsaiosDelivered += numEns;
         }
 
-        // Check NCs strictly linked to this batch ID using O(1) Map lookup
         const ncListLocal = b.nonConformities || [];
         const ncListFirestore = ncMapByBatch.get(b.id) || [];
         const batchNCs = ncListLocal.length > 0 ? ncListLocal : ncListFirestore;
 
         if (batchNCs.length > 0) {
           ncCount += batchNCs.length;
+          batchNCs.forEach((ncItem: any) => {
+            ncPlatesCount += Array.isArray(ncItem.placas) && ncItem.placas.length > 0 ? ncItem.placas.length : 1;
+          });
         }
 
         // Check Delays
-        const deadline = b.periodoInicial ? addDays(b.periodoInicial.toDate(), 30) : null;
-        const isFinishedLate = isFinished && b.conferidoEm && deadline && isAfter(b.conferidoEm.toDate(), deadline);
+        const pInicialDate = toSafeDate(b.periodoInicial);
+        const cDate = toSafeDate(b.conferidoEm);
+        const deadline = pInicialDate ? addDays(pInicialDate, 30) : null;
+        const isFinishedLate = isFinished && cDate && deadline && isAfter(cDate, deadline);
         const isOpenLate = !isFinished && deadline && isAfter(new Date(), deadline);
         const isMarkedLate = b.ensaioForaDoPrazo === true || b.status === 'ATRASO';
 
@@ -5962,6 +6480,7 @@ function PacComplianceSection({
       });
 
       const isFullyCompliant = ncCount === 0 && delayCount === 0;
+      const errorRatePercent = totalEnsaios > 0 ? Number(((ncPlatesCount / totalEnsaios) * 100).toFixed(2)) : 0;
 
       return {
         pac: pacName,
@@ -5969,6 +6488,8 @@ function PacComplianceSection({
         totalEnsaios,
         totalEnsaiosDelivered,
         ncCount,
+        ncPlatesCount,
+        errorRatePercent,
         delayCount,
         isFullyCompliant,
         pacBatches
@@ -5980,7 +6501,9 @@ function PacComplianceSection({
     const nonCompliantPacs = activePacs.filter(r => !r.isFullyCompliant);
 
     return {
+      allPacNames,
       allResults: results,
+      periodBatches,
       activePacs,
       compliantPacs,
       nonCompliantPacs,
@@ -5988,17 +6511,18 @@ function PacComplianceSection({
       compliantPacsCount: compliantPacs.length,
       nonCompliantPacsCount: nonCompliantPacs.length,
       compliancePercentage: activePacs.length > 0 ? Math.round((compliantPacs.length / activePacs.length) * 100) : 100,
+      totalEnsaiosPeriod: activePacs.reduce((acc, p) => acc + p.totalEnsaios, 0),
       totalEnsaiosCompliant: compliantPacs.reduce((acc, p) => acc + p.totalEnsaios, 0)
     };
   }, [pacs, batches, nonConformityRecords, statsStartDate, statsEndDate]);
 
-  // Filter list based on selected complianceTab and search string
+  // Filter and sort list for the main table
   const displayedPacs = useMemo(() => {
-    let list = pacMetrics.activePacs;
+    let list = [...pacMetrics.activePacs];
     if (complianceTab === 'compliant') {
-      list = pacMetrics.compliantPacs;
+      list = [...pacMetrics.compliantPacs];
     } else if (complianceTab === 'nonCompliant') {
-      list = pacMetrics.nonCompliantPacs;
+      list = [...pacMetrics.nonCompliantPacs];
     }
 
     if (searchTerm.trim()) {
@@ -6006,29 +6530,78 @@ function PacComplianceSection({
       list = list.filter(item => item.pac.toLowerCase().includes(term));
     }
 
+    if (pacSortOrder === 'ensaios_desc') {
+      list.sort((a, b) => b.totalEnsaios - a.totalEnsaios || a.pac.localeCompare(b.pac));
+    } else if (pacSortOrder === 'nc_desc') {
+      list.sort((a, b) => b.ncPlatesCount - a.ncPlatesCount || b.delayCount - a.delayCount || b.totalEnsaios - a.totalEnsaios);
+    } else {
+      list.sort((a, b) => a.pac.localeCompare(b.pac));
+    }
+
     return list;
-  }, [pacMetrics, complianceTab, searchTerm]);
+  }, [pacMetrics, complianceTab, searchTerm, pacSortOrder]);
+
+  // Evolution grouping logic
+  const rangeInDays = useMemo(() => {
+    const start = parseLocalDate(statsStartDate || defaultStatsStart);
+    const end = parseLocalDate(statsEndDate || defaultStatsEnd);
+    return differenceInDays(end, start);
+  }, [statsStartDate, statsEndDate, defaultStatsStart, defaultStatsEnd]);
+
+  const groupingType = useMemo<'day' | 'month' | 'year'>(() => {
+    if (rangeInDays <= 31) return 'day';
+    if (rangeInDays <= 365) return 'month';
+    return 'year';
+  }, [rangeInDays]);
+
+  const getGroupKeyAndLabel = (date: Date, type: 'day' | 'month' | 'year') => {
+    if (type === 'day') {
+      return { key: format(date, 'yyyy-MM-dd'), label: format(date, 'dd/MM/yyyy', { locale: ptBR }) };
+    } else if (type === 'month') {
+      return { key: format(date, 'yyyy-MM'), label: format(date, "MMM/yyyy", { locale: ptBR }) };
+    }
+    return { key: format(date, 'yyyy'), label: format(date, 'yyyy') };
+  };
+
+  const evolutionData = useMemo(() => {
+    const groups: Record<string, { key: string; label: string; totalEnsaios: number; totalLotes: number; dateObj: Date }> = {};
+
+    pacMetrics.periodBatches.forEach(b => {
+      if (selectedPacEvolution !== 'all' && b.pac !== selectedPacEvolution) return;
+      const date = toSafeDate(b.recebidoEm) || toSafeDate(b.periodoInicial);
+      if (!date) return;
+      const { key, label } = getGroupKeyAndLabel(date, groupingType);
+      if (!groups[key]) {
+        groups[key] = { key, label, totalEnsaios: 0, totalLotes: 0, dateObj: date };
+      }
+      groups[key].totalEnsaios += Number(b.numEnsaios) || 0;
+      groups[key].totalLotes += 1;
+    });
+
+    return Object.values(groups).sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
+  }, [pacMetrics.periodBatches, selectedPacEvolution, groupingType]);
 
   // Export excel handler
   const handleExportExcel = () => {
-    const listToExport = complianceTab === 'compliant' ? pacMetrics.compliantPacs : complianceTab === 'nonCompliant' ? pacMetrics.nonCompliantPacs : pacMetrics.activePacs;
-    
-    const exportData = listToExport.map(item => ({
+    const exportData = displayedPacs.map(item => ({
       'PAC': item.pac,
       'Lotes no Período': item.totalBatches,
-      'Ensaios Entregues': item.totalEnsaios,
-      'Não Conformidades': item.ncCount,
+      'Total de Ensaios': item.totalEnsaios,
+      'Ensaios Concluídos': item.totalEnsaiosDelivered,
+      'Ocorrências de NC': item.ncCount,
+      'Placas com NC': item.ncPlatesCount,
+      'Taxa de Erro (%)': `${item.errorRatePercent}%`,
       'Atrasos de Entrega': item.delayCount,
       'Status de Conformidade': item.isFullyCompliant ? '100% CONFORME (SEM NC / SEM ATRASO)' : 'COM OCORRÊNCIA'
     }));
 
     const ws = utils.json_to_sheet(exportData);
     const wb = utils.book_new();
-    utils.book_append_sheet(wb, ws, 'PACs Conformidade');
+    utils.book_append_sheet(wb, ws, 'Desempenho_PACs');
     
     const startStr = statsStartDate || 'inicio';
     const endStr = statsEndDate || 'fim';
-    writeFile(wb, `Relacao_PACs_Conformidade_${startStr}_ate_${endStr}.xlsx`);
+    writeFile(wb, `Desempenho_e_Conformidade_PACs_${startStr}_ate_${endStr}.xlsx`);
   };
 
   // Copy list handler
@@ -6037,13 +6610,13 @@ function PacComplianceSection({
     const endStr = statsEndDate ? format(parseLocalDate(statsEndDate), 'dd/MM/yyyy') : 'Fim';
     
     const lines = [
-      `RELAÇÃO DE PACS SEM NÃO CONFORMIDADES E SEM ATRASOS DE ENTREGA`,
+      `RELATÓRIO DE DESEMPENHO E CONFORMIDADE DOS PACS`,
       `Período Analisado: ${startStr} até ${endStr}`,
-      `Total de PACs Conformes: ${pacMetrics.compliantPacsCount} de ${pacMetrics.totalActivePacsCount} (${pacMetrics.compliancePercentage}%)`,
-      `Volume Total de Ensaios Conformes: ${pacMetrics.totalEnsaiosCompliant.toLocaleString('pt-BR')}`,
+      `PACs 100% Conformes: ${pacMetrics.compliantPacsCount} de ${pacMetrics.totalActivePacsCount} (${pacMetrics.compliancePercentage}%)`,
+      `Volume Total de Ensaios no Período: ${pacMetrics.totalEnsaiosPeriod.toLocaleString('pt-BR')}`,
       `--------------------------------------------------`,
-      ...pacMetrics.compliantPacs.map((p, idx) => 
-        `${idx + 1}. ${p.pac} -> ${p.totalEnsaios.toLocaleString('pt-BR')} ensaios entregues em ${p.totalBatches} lote(s) [0 NC / 0 Atrasos]`
+      ...displayedPacs.map((p, idx) => 
+        `${idx + 1}. ${p.pac} -> ${p.totalEnsaios.toLocaleString('pt-BR')} ensaios (${p.totalBatches} lotes) | NCs: ${p.ncCount} (${p.errorRatePercent}%) | Atrasos: ${p.delayCount}`
       )
     ].join('\n');
 
@@ -6054,234 +6627,355 @@ function PacComplianceSection({
 
   return (
     <div className="bg-white rounded-[32px] p-8 border border-[#e5e5e0] mt-8 space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#f5f5f0] pb-6">
-        <div>
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-emerald-50 rounded-2xl text-emerald-700">
-              <ShieldCheck size={26} />
-            </div>
-            <div>
-              <h3 className="text-xl font-display font-bold tracking-tight text-gray-900">
-                PACs sem Não Conformidades ou Atrasos
-              </h3>
-              <p className="text-xs text-[#5A5A40]/70 mt-0.5">
-                Relação detalhada dos PACs com 100% de conformidade operacional e sem atrasos de entrega no período selecionado.
-              </p>
-            </div>
+      {/* Header Unificado */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-[#f5f5f0] pb-6">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 bg-emerald-50 rounded-2xl text-emerald-700">
+            <ShieldCheck size={26} />
+          </div>
+          <div>
+            <h3 className="text-xl font-display font-bold tracking-tight text-gray-900">
+              Desempenho, Volume e Conformidade por PAC
+            </h3>
+            <p className="text-xs text-[#5A5A40]/70 mt-0.5">
+              Visão unificada de produção de ensaios, índice de falhas (placas não-conformes), pontualidade e evolução temporal por PAC.
+            </p>
           </div>
         </div>
 
-        {/* Actions */}
+        {/* Mode Switcher + Export Actions */}
         <div className="flex flex-wrap items-center gap-2">
+          <div className="flex bg-[#f5f5f0] p-1 rounded-xl mr-2">
+            <button
+              onClick={() => setViewMode('ranking')}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                viewMode === 'ranking' ? "bg-white text-[#5A5A40] shadow-xs" : "text-[#5A5A40]/60 hover:text-[#5A5A40]"
+              )}
+            >
+              Tabela & Conformidade
+            </button>
+            <button
+              onClick={() => setViewMode('evolution')}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                viewMode === 'evolution' ? "bg-white text-[#5A5A40] shadow-xs" : "text-[#5A5A40]/60 hover:text-[#5A5A40]"
+              )}
+            >
+              Gráfico de Evolução
+            </button>
+          </div>
+
           <button
             onClick={handleExportExcel}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm cursor-pointer"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer"
           >
             <FileSpreadsheet size={15} />
-            Exportar Excel (.xlsx)
+            Exportar Excel
           </button>
           <button
             onClick={handleCopyList}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#f5f5f0] hover:bg-gray-200 text-[#5A5A40] rounded-xl text-xs font-bold transition-all cursor-pointer"
+            className="inline-flex items-center gap-2 px-3.5 py-2 bg-[#f5f5f0] hover:bg-gray-200 text-[#5A5A40] rounded-xl text-xs font-bold transition-all cursor-pointer"
           >
             <Copy size={15} />
-            {copied ? 'Copiado!' : 'Copiar Relação'}
+            {copied ? 'Copiado!' : 'Copiar'}
           </button>
         </div>
       </div>
 
-      {/* KPI Summary Cards */}
+      {/* KPI Summary Cards dos PACs */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-[#f5f5f0]/70 border border-[#e5e5e0] p-5 rounded-2xl">
+          <div className="flex items-center justify-between text-[#5A5A40] mb-2">
+            <span className="text-xs font-bold uppercase tracking-wider">Volume Total dos PACs</span>
+            <BarChart3 size={18} className="text-[#5A5A40]" />
+          </div>
+          <div className="text-2xl font-bold text-gray-900">
+            {pacMetrics.totalEnsaiosPeriod.toLocaleString('pt-BR')}
+          </div>
+          <p className="text-[11px] text-[#5A5A40]/70 mt-1 font-medium">
+            Em {pacMetrics.totalActivePacsCount} PACs com movimentação
+          </p>
+        </div>
+
         <div className="bg-emerald-50/70 border border-emerald-200/80 p-5 rounded-2xl">
           <div className="flex items-center justify-between text-emerald-800 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">100% Conformes</span>
+            <span className="text-xs font-bold uppercase tracking-wider">PACs 100% Conformes</span>
             <CheckCircle2 size={18} className="text-emerald-600" />
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-bold text-emerald-900">{pacMetrics.compliantPacsCount}</span>
-            <span className="text-xs font-medium text-emerald-700">
-              de {pacMetrics.totalActivePacsCount} PACs
+            <span className="text-xs font-bold text-emerald-700">
+              ({pacMetrics.compliancePercentage}%)
             </span>
           </div>
-          <p className="text-[11px] text-emerald-700/80 mt-1 font-medium">Sem NC e sem atraso no período</p>
-        </div>
-
-        <div className="bg-[#f5f5f0]/80 border border-[#e5e5e0] p-5 rounded-2xl">
-          <div className="flex items-center justify-between text-[#5A5A40] mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Taxa de Conformidade</span>
-            <BarChart3 size={18} className="text-[#5A5A40]" />
-          </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {pacMetrics.compliancePercentage}%
-          </div>
-          <p className="text-[11px] text-[#5A5A40]/70 mt-1 font-medium">Proporção de PACs 100% regulares</p>
+          <p className="text-[11px] text-emerald-700/80 mt-1 font-medium">Zero NCs e zero atrasos no período</p>
         </div>
 
         <div className="bg-blue-50/70 border border-blue-200/80 p-5 rounded-2xl">
           <div className="flex items-center justify-between text-blue-800 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Ensaios Conformes</span>
+            <span className="text-xs font-bold uppercase tracking-wider">Ensaios s/ Ocorrência</span>
             <TrendingUp size={18} className="text-blue-600" />
           </div>
           <div className="text-2xl font-bold text-blue-950">
             {pacMetrics.totalEnsaiosCompliant.toLocaleString('pt-BR')}
           </div>
-          <p className="text-[11px] text-blue-700/80 mt-1 font-medium">Ensaios em PACs sem falhas</p>
+          <p className="text-[11px] text-blue-700/80 mt-1 font-medium">Entregues por PACs 100% regulares</p>
         </div>
 
         <div className="bg-amber-50/70 border border-amber-200/80 p-5 rounded-2xl">
           <div className="flex items-center justify-between text-amber-800 mb-2">
-            <span className="text-xs font-bold uppercase tracking-wider">Com Ocorrências</span>
+            <span className="text-xs font-bold uppercase tracking-wider">PACs com Ocorrências</span>
             <AlertTriangle size={18} className="text-amber-600" />
           </div>
           <div className="text-2xl font-bold text-amber-950">
             {pacMetrics.nonCompliantPacsCount}
           </div>
-          <p className="text-[11px] text-amber-700/80 mt-1 font-medium">Com NC ou atraso no período</p>
+          <p className="text-[11px] text-amber-700/80 mt-1 font-medium">Apresentaram NC ou atraso de prazo</p>
         </div>
       </div>
 
-      {/* Tabs and Search Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2">
-        <div className="flex flex-wrap gap-1 bg-[#f5f5f0] p-1 rounded-xl">
-          <button
-            onClick={() => setComplianceTab('compliant')}
-            className={cn(
-              "px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-              complianceTab === 'compliant' ? "bg-white text-emerald-800 shadow-sm" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
-            )}
-          >
-            <CheckCircle2 size={14} className={complianceTab === 'compliant' ? "text-emerald-600" : ""} />
-            PACs 100% Conformes ({pacMetrics.compliantPacsCount})
-          </button>
+      {viewMode === 'ranking' ? (
+        <>
+          {/* Filter Bar: Status Tabs + Sort + Search */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pt-2">
+            <div className="flex flex-wrap gap-1 bg-[#f5f5f0] p-1 rounded-xl">
+              <button
+                onClick={() => setComplianceTab('all')}
+                className={cn(
+                  "px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer",
+                  complianceTab === 'all' ? "bg-white text-[#5A5A40] shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
+                )}
+              >
+                Todos Ativos ({pacMetrics.totalActivePacsCount})
+              </button>
+              <button
+                onClick={() => setComplianceTab('compliant')}
+                className={cn(
+                  "px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                  complianceTab === 'compliant' ? "bg-white text-emerald-800 shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
+                )}
+              >
+                <CheckCircle2 size={14} className={complianceTab === 'compliant' ? "text-emerald-600" : ""} />
+                100% Conformes ({pacMetrics.compliantPacsCount})
+              </button>
+              <button
+                onClick={() => setComplianceTab('nonCompliant')}
+                className={cn(
+                  "px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
+                  complianceTab === 'nonCompliant' ? "bg-white text-amber-800 shadow-xs" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
+                )}
+              >
+                <AlertTriangle size={14} className={complianceTab === 'nonCompliant' ? "text-amber-600" : ""} />
+                Com Ocorrências ({pacMetrics.nonCompliantPacsCount})
+              </button>
+            </div>
 
-          <button
-            onClick={() => setComplianceTab('nonCompliant')}
-            className={cn(
-              "px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer",
-              complianceTab === 'nonCompliant' ? "bg-white text-amber-800 shadow-sm" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
-            )}
-          >
-            <AlertTriangle size={14} className={complianceTab === 'nonCompliant' ? "text-amber-600" : ""} />
-            Com Ocorrências ({pacMetrics.nonCompliantPacsCount})
-          </button>
+            <div className="flex flex-wrap items-center gap-3">
+              <select
+                value={pacSortOrder}
+                onChange={(e) => setPacSortOrder(e.target.value as any)}
+                className="px-3 py-2 bg-[#f5f5f0] border-none rounded-xl text-xs font-bold text-[#5A5A40] focus:ring-2 focus:ring-[#5A5A40]/20 focus:outline-none"
+              >
+                <option value="ensaios_desc">Ordenar: Maior Volume de Ensaios</option>
+                <option value="nc_desc">Ordenar: Maior Nº de Falhas / NCs</option>
+                <option value="alphabetical">Ordenar: Ordem Alfabética (A-Z)</option>
+              </select>
 
-          <button
-            onClick={() => setComplianceTab('all')}
-            className={cn(
-              "px-3.5 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer",
-              complianceTab === 'all' ? "bg-white text-[#5A5A40] shadow-sm" : "text-[#5A5A40]/70 hover:text-[#5A5A40]"
-            )}
-          >
-            Todos os PACs ({pacMetrics.totalActivePacsCount})
-          </button>
+              <div className="relative w-full sm:w-60">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={15} />
+                <input
+                  type="text"
+                  placeholder="Buscar PAC..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 bg-[#f5f5f0] border-none rounded-xl text-xs focus:ring-2 focus:ring-[#5A5A40]/20 focus:outline-none font-medium text-gray-700"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Unified PAC Table */}
+          <div className="overflow-x-auto rounded-2xl border border-[#e5e5e0]">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-[#f5f5f0] text-[10px] uppercase font-bold text-[#5A5A40] opacity-80 border-b border-[#e5e5e0]">
+                  <th className="py-3.5 px-4">PAC</th>
+                  <th className="py-3.5 px-4 text-center">Lotes</th>
+                  <th className="py-3.5 px-4 text-center">Volume de Ensaios</th>
+                  <th className="py-3.5 px-4 text-center">Não Conformidades</th>
+                  <th className="py-3.5 px-4 text-center">Índice de Falha</th>
+                  <th className="py-3.5 px-4 text-center">Atrasos</th>
+                  <th className="py-3.5 px-4 text-center">Situação</th>
+                  <th className="py-3.5 px-4 text-right">Detalhes</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#f5f5f0] bg-white">
+                {displayedPacs.map((row, idx) => (
+                  <tr key={row.pac} className="group hover:bg-[#f5f5f0]/40 transition-colors">
+                    <td className="py-3.5 px-4">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono font-bold text-gray-400 w-5">{idx + 1}º</span>
+                        <span className="font-bold text-sm text-gray-800">{row.pac}</span>
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4 text-center font-medium text-xs text-gray-600">
+                      {row.totalBatches}
+                    </td>
+                    <td className="py-3.5 px-4 text-center">
+                      <span className="font-extrabold text-xs text-gray-900 bg-gray-100 px-2.5 py-1 rounded-lg">
+                        {row.totalEnsaios.toLocaleString('pt-BR')}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4 text-center">
+                      {row.ncCount === 0 ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">
+                          <Check size={12} /> 0 NCs
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-red-50 text-red-700 rounded-full text-xs font-bold">
+                          <AlertCircle size={12} /> {row.ncPlatesCount} {row.ncPlatesCount === 1 ? 'placa' : 'placas'} ({row.ncCount})
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 text-center">
+                      <span className={cn(
+                        "text-xs font-mono font-bold",
+                        row.errorRatePercent === 0 ? "text-emerald-600" : row.errorRatePercent <= 2 ? "text-amber-700" : "text-red-700"
+                      )}>
+                        {row.errorRatePercent}%
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4 text-center">
+                      {row.delayCount === 0 ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">
+                          <Check size={12} /> 0
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-50 text-amber-800 rounded-full text-xs font-bold">
+                          <Clock size={12} /> {row.delayCount}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 text-center">
+                      {row.isFullyCompliant ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-lg text-[11px] font-bold">
+                          <CheckCircle2 size={12} className="text-emerald-600" /> 100% Conforme
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-amber-100 text-amber-900 rounded-lg text-[11px] font-bold">
+                          <AlertTriangle size={12} className="text-amber-700" /> Com Ocorrência
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 text-right">
+                      <button
+                        onClick={() => setSelectedPacForModal(row)}
+                        className="px-3 py-1.5 bg-[#f5f5f0] hover:bg-gray-200 text-[#5A5A40] rounded-lg text-xs font-bold transition-all cursor-pointer"
+                      >
+                        Ver Lotes
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+
+                {displayedPacs.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="py-12 text-center text-sm text-[#5A5A40]/70 italic">
+                      Nenhum PAC encontrado para os filtros selecionados neste período.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : (
+        /* ABA DE EVOLUÇÃO TEMPORAL POR PAC */
+        <div className="space-y-6 pt-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#f9f9f6] p-4 rounded-2xl border border-[#e5e5e0]">
+            <div>
+              <h4 className="text-sm font-bold text-gray-900">Evolução Cronológica de Volume</h4>
+              <p className="text-xs text-gray-500">
+                Acompanhe o comportamento de entrega de ensaios ao longo do tempo ({groupingType === 'day' ? 'Diário' : groupingType === 'month' ? 'Mensal' : 'Anual'}).
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold uppercase text-[#5A5A40]">Selecionar PAC:</label>
+              <select
+                value={selectedPacEvolution}
+                onChange={(e) => setSelectedPacEvolution(e.target.value)}
+                className="px-3 py-2 bg-white border border-[#e5e5e0] rounded-xl text-xs font-bold text-[#5A5A40] focus:outline-none"
+              >
+                <option value="all">Todos os PACs Consolidados</option>
+                {pacMetrics.allPacNames.map(p => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+            <div className="lg:col-span-2 bg-[#fcfbf9] p-6 rounded-2xl border border-[#e5e5e0]">
+              {evolutionData.length > 1 ? (
+                <div className="h-72 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={evolutionData} margin={{ top: 15, right: 25, left: 5, bottom: 10 }}>
+                      <defs>
+                        <linearGradient id="colorEnsaiosUnified" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.25}/>
+                          <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E5E0" />
+                      <XAxis dataKey="label" tick={{ fill: '#5A5A40', fontSize: 10 }} axisLine={{ stroke: '#E5E5E0' }} />
+                      <YAxis tick={{ fill: '#5A5A40', fontSize: 11 }} axisLine={false} tickLine={false} />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: 'white', borderRadius: '14px', border: '1px solid #E5E5E0', fontSize: '12px' }}
+                        labelStyle={{ fontWeight: 'bold', color: '#1a1a1a' }}
+                      />
+                      <Area type="monotone" dataKey="totalEnsaios" name="Total de Ensaios" stroke="#10b981" fillOpacity={1} fill="url(#colorEnsaiosUnified)" strokeWidth={3} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center p-8 h-64 text-xs text-[#5A5A40]/60 text-center">
+                  <Clock size={32} className="text-[#5A5A40]/30 mb-2" />
+                  <span>Selecione um intervalo com entregas em ao menos 2 datas/meses distintos para visualizar a curva de evolução.</span>
+                </div>
+              )}
+            </div>
+
+            <div className="overflow-y-auto max-h-80 rounded-2xl border border-[#e5e5e0]">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="bg-[#f5f5f0] text-[10px] uppercase font-bold text-[#5A5A40] border-b border-[#e5e5e0]">
+                    <th className="py-3 px-4">Período</th>
+                    <th className="py-3 px-4 text-center">Lotes</th>
+                    <th className="py-3 px-4 text-right">Ensaios</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#f5f5f0] bg-white">
+                  {evolutionData.map(item => (
+                    <tr key={item.key} className="hover:bg-gray-50">
+                      <td className="py-2.5 px-4 text-xs font-medium capitalize">{item.label}</td>
+                      <td className="py-2.5 px-4 text-center text-xs text-gray-500">{item.totalLotes}</td>
+                      <td className="py-2.5 px-4 text-right text-xs font-bold text-emerald-700">
+                        {item.totalEnsaios.toLocaleString('pt-BR')}
+                      </td>
+                    </tr>
+                  ))}
+                  {evolutionData.length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="py-8 text-center text-xs text-gray-400 italic">Sem registros no período.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
-
-        <div className="relative w-full sm:w-64">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={15} />
-          <input
-            type="text"
-            placeholder="Buscar por nome do PAC..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 bg-[#f5f5f0] border-none rounded-xl text-xs focus:ring-2 focus:ring-[#5A5A40]/20 focus:outline-none font-medium text-gray-700"
-          />
-        </div>
-      </div>
-
-      {/* Table */}
-      <div className="overflow-x-auto rounded-2xl border border-[#e5e5e0]">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="bg-[#f5f5f0] text-[10px] uppercase font-bold text-[#5A5A40] opacity-80 border-b border-[#e5e5e0]">
-              <th className="py-3 px-4">PAC</th>
-              <th className="py-3 px-4 text-center">Lotes no Período</th>
-              <th className="py-3 px-4 text-center">Ensaios Entregues</th>
-              <th className="py-3 px-4 text-center">Não Conformidades</th>
-              <th className="py-3 px-4 text-center">Atrasos de Entrega</th>
-              <th className="py-3 px-4 text-center">Status de Conformidade</th>
-              <th className="py-3 px-4 text-right">Ação</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[#f5f5f0] bg-white">
-            {displayedPacs.map((row) => (
-              <tr key={row.pac} className="group hover:bg-[#f5f5f0]/40 transition-colors">
-                <td className="py-3.5 px-4 font-bold text-sm text-gray-800">
-                  {row.pac}
-                </td>
-                <td className="py-3.5 px-4 text-center font-medium text-xs text-gray-600">
-                  {row.totalBatches} {row.totalBatches === 1 ? 'lote' : 'lotes'}
-                </td>
-                <td className="py-3.5 px-4 text-center font-bold text-xs text-gray-800">
-                  {row.totalEnsaios.toLocaleString('pt-BR')}
-                </td>
-                <td className="py-3.5 px-4 text-center">
-                  {row.ncCount === 0 ? (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">
-                      <Check size={12} /> 0 NCs
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-red-50 text-red-700 rounded-full text-xs font-bold">
-                      <AlertCircle size={12} /> {row.ncCount} NC{row.ncCount > 1 ? 's' : ''}
-                    </span>
-                  )}
-                </td>
-                <td className="py-3.5 px-4 text-center">
-                  {row.delayCount === 0 ? (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-xs font-bold">
-                      <Check size={12} /> 0 Atrasos
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-50 text-amber-800 rounded-full text-xs font-bold">
-                      <Clock size={12} /> {row.delayCount} Atraso{row.delayCount > 1 ? 's' : ''}
-                    </span>
-                  )}
-                </td>
-                <td className="py-3.5 px-4 text-center">
-                  {row.isFullyCompliant ? (
-                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-100 text-emerald-800 rounded-lg text-xs font-bold border border-emerald-300">
-                      <CheckCircle2 size={13} className="text-emerald-600" /> 100% Conforme
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-100 text-amber-900 rounded-lg text-xs font-bold border border-amber-300">
-                      <AlertTriangle size={13} className="text-amber-700" /> Com Ocorrência
-                    </span>
-                  )}
-                </td>
-                <td className="py-3.5 px-4 text-right">
-                  <button
-                    onClick={() => setSelectedPacForModal(row)}
-                    className="px-3 py-1.5 bg-[#f5f5f0] hover:bg-gray-200 text-[#5A5A40] rounded-lg text-xs font-bold transition-all cursor-pointer"
-                  >
-                    Ver Lotes
-                  </button>
-                </td>
-              </tr>
-            ))}
-
-            {displayedPacs.length === 0 && (
-              <tr>
-                <td colSpan={7} className="py-12 text-center text-sm text-[#5A5A40]/70 italic">
-                  {complianceTab === 'compliant' && (
-                    <div className="space-y-1">
-                      <p className="font-bold text-gray-700 not-italic">Nenhum PAC 100% conforme encontrado no período selecionado.</p>
-                      <p className="text-xs">Todos os PACs com movimentação no período registraram ao menos uma não conformidade ou atraso de entrega.</p>
-                    </div>
-                  )}
-                  {complianceTab === 'nonCompliant' && (
-                    <div className="space-y-1">
-                      <p className="font-bold text-emerald-800 not-italic">Parabéns! Nenhum PAC apresentou ocorrências de atraso ou não conformidade no período.</p>
-                    </div>
-                  )}
-                  {complianceTab === 'all' && (
-                    <p>Nenhum PAC com lotes movimentados no período selecionado.</p>
-                  )}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      )}
 
       {/* Modal for viewing batch details for a PAC */}
       {selectedPacForModal && (
@@ -6315,26 +7009,21 @@ function PacComplianceSection({
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs text-gray-600">
                       <div>
-                        <span className="font-semibold block text-[10px] uppercase opacity-60">Período Inicial:</span>
-                        {b.periodoInicial ? format(b.periodoInicial.toDate(), 'dd/MM/yyyy') : '-'}
+                        <span className="font-semibold block text-[10px] uppercase opacity-60">Recebido Por / Em:</span>
+                        {b.recebidoPor || '-'} ({toSafeDate(b.recebidoEm) ? format(toSafeDate(b.recebidoEm)!, 'dd/MM/yyyy') : '-'})
                       </div>
                       <div>
-                        <span className="font-semibold block text-[10px] uppercase opacity-60">Recebido em:</span>
-                        {b.recebidoEm ? format(b.recebidoEm.toDate(), 'dd/MM/yyyy') : '-'}
+                        <span className="font-semibold block text-[10px] uppercase opacity-60">Lido Por / Em:</span>
+                        {b.lidoPor || 'Pendente'} {toSafeDate(b.lidoEm) ? `(${format(toSafeDate(b.lidoEm)!, 'dd/MM/yyyy')})` : ''}
                       </div>
                       <div>
-                        <span className="font-semibold block text-[10px] uppercase opacity-60">Status do Lote:</span>
-                        <span className="font-bold text-gray-800">{b.status || 'ABERTO'}</span>
-                      </div>
-                      <div>
-                        <span className="font-semibold block text-[10px] uppercase opacity-60">Conferido Por:</span>
-                        {b.conferidoPor || 'Pendente'}
+                        <span className="font-semibold block text-[10px] uppercase opacity-60">Informado Por / Em:</span>
+                        {b.conferidoPor || 'Pendente'} {toSafeDate(b.conferidoEm) ? `(${format(toSafeDate(b.conferidoEm)!, 'dd/MM/yyyy')})` : ''}
                       </div>
                     </div>
 
-                    {/* Non conformities badge/list */}
                     {batchNCs.length > 0 ? (
                       <div className="bg-red-50 border border-red-200 rounded-xl p-2.5 space-y-1">
                         <span className="text-[10px] uppercase font-bold text-red-800 block">
@@ -6367,10 +7056,6 @@ function PacComplianceSection({
                   </div>
                 );
               })}
-
-              {selectedPacForModal.pacBatches.length === 0 && (
-                <p className="text-center py-6 text-xs text-gray-500 italic">Nenhum lote registrado para este PAC no período.</p>
-              )}
             </div>
 
             <div className="pt-2 text-right">
@@ -6384,383 +7069,6 @@ function PacComplianceSection({
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-interface PacProductivitySectionProps {
-  batches: any[];
-  pacs: any[];
-  statsStartDate: string;
-  statsEndDate: string;
-  defaultStatsStart: string;
-  defaultStatsEnd: string;
-}
-
-function PacProductivitySection({
-  batches,
-  pacs,
-  statsStartDate,
-  statsEndDate,
-  defaultStatsStart,
-  defaultStatsEnd
-}: PacProductivitySectionProps) {
-  const [selectedPacFilter, setSelectedPacFilter] = useState<string>('all');
-  const [pacSortOrder, setPacSortOrder] = useState<'delivered_desc' | 'alphabetical'>('delivered_desc');
-
-  // Find all delivered batches in the stats period (using RECEBIDO EM)
-  const pacStats = useMemo(() => {
-    return batches.filter(b => {
-      const isFinished = b.conferidoPor && b.conferidoPor.trim() !== '';
-      if (!isFinished) return false;
-
-      const dateObj = b.recebidoEm ? b.recebidoEm.toDate() : b.periodoInicial?.toDate();
-      if (!dateObj) return false;
-
-      if (statsStartDate) {
-        const start = startOfDay(parseLocalDate(statsStartDate));
-        if (dateObj < start) return false;
-      }
-      if (statsEndDate) {
-        const end = startOfDay(parseLocalDate(statsEndDate));
-        if (startOfDay(dateObj) > end) return false;
-      }
-      return true;
-    });
-  }, [batches, statsStartDate, statsEndDate]);
-
-  // Unique list of all PAC names (from config pacs AND batches to be absolutely exhaustive)
-  const allPacNames = useMemo(() => {
-    const fromConfig = pacs.map(p => p.name);
-    const fromBatches = batches.map(b => b.pac);
-    return Array.from(new Set([...fromConfig, ...fromBatches])).filter(Boolean).sort((a, b) => a.localeCompare(b));
-  }, [pacs, batches]);
-
-  // Grouped data when 'all' is selected
-  const pacGroupedData = useMemo(() => {
-    const list = allPacNames.map(pacName => {
-      const pacBatches = pacStats.filter(b => b.pac === pacName);
-      const totalEnsaios = pacBatches.reduce((acc, b) => acc + b.numEnsaios, 0);
-      return {
-        pac: pacName,
-        totalEnsaios
-      };
-    });
-
-    // Sort list based on pacSortOrder
-    if (pacSortOrder === 'delivered_desc') {
-      list.sort((a, b) => b.totalEnsaios - a.totalEnsaios || a.pac.localeCompare(b.pac));
-    } else {
-      list.sort((a, b) => a.pac.localeCompare(b.pac));
-    }
-
-    return list;
-  }, [allPacNames, pacStats, pacSortOrder]);
-
-  // Determine scale/grouping type of selected dates
-  const rangeInDays = useMemo(() => {
-    const start = parseLocalDate(statsStartDate || defaultStatsStart);
-    const end = parseLocalDate(statsEndDate || defaultStatsEnd);
-    return differenceInDays(end, start);
-  }, [statsStartDate, statsEndDate, defaultStatsStart, defaultStatsEnd]);
-
-  const groupingType = useMemo<'day' | 'month' | 'year'>(() => {
-    if (rangeInDays <= 31) {
-      return 'day';
-    } else if (rangeInDays <= 365) {
-      return 'month';
-    } else {
-      return 'year';
-    }
-  }, [rangeInDays]);
-
-  // Helper inside component to get formatted dates
-  const getGroupKeyAndLabel = (date: Date, type: 'day' | 'month' | 'year') => {
-    if (type === 'day') {
-      return {
-        key: format(date, 'yyyy-MM-dd'),
-        label: format(date, 'dd/MM/yyyy', { locale: ptBR })
-      };
-    } else if (type === 'month') {
-      return {
-        key: format(date, 'yyyy-MM'),
-        label: format(date, "MMMM 'de' yyyy", { locale: ptBR })
-      };
-    } else {
-      return {
-        key: format(date, 'yyyy'),
-        label: format(date, 'yyyy')
-      };
-    }
-  };
-
-  // Grouped data when a specific PAC is selected
-  const specificPacData = useMemo(() => {
-    if (selectedPacFilter === 'all') return [];
-
-    const pacBatchesInPeriod = pacStats.filter(b => b.pac === selectedPacFilter);
-    
-    // Group them
-    const groups: Record<string, { key: string, label: string, totalEnsaios: number, dateObj: Date }> = {};
-    
-    pacBatchesInPeriod.forEach(b => {
-      const date = b.recebidoEm ? b.recebidoEm.toDate() : b.periodoInicial?.toDate();
-      if (!date) return;
-      const { key, label } = getGroupKeyAndLabel(date, groupingType);
-      if (!groups[key]) {
-        groups[key] = {
-          key,
-          label,
-          totalEnsaios: 0,
-          dateObj: date
-        };
-      }
-      groups[key].totalEnsaios += b.numEnsaios;
-    });
-
-    // Sort chronologically
-    return Object.values(groups).sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
-  }, [pacStats, selectedPacFilter, groupingType]);
-
-  // Grouped breakdown of all PACs by month/year (when selectedPacFilter is 'all' and groupingType !== 'day')
-  const allPacsBreakdownData = useMemo(() => {
-    if (selectedPacFilter !== 'all' || groupingType === 'day') return [];
-
-    const groups: Record<string, { key: string; label: string; pac: string; totalEnsaios: number; dateObj: Date }> = {};
-
-    pacStats.forEach(b => {
-      const date = b.recebidoEm ? b.recebidoEm.toDate() : b.periodoInicial?.toDate();
-      if (!date) return;
-      const { key, label } = getGroupKeyAndLabel(date, groupingType);
-      const compositeKey = `${key}_${b.pac}`;
-
-      if (!groups[compositeKey]) {
-        groups[compositeKey] = {
-          key,
-          label,
-          pac: b.pac || 'Sem PAC',
-          totalEnsaios: 0,
-          dateObj: date
-        };
-      }
-      groups[compositeKey].totalEnsaios += b.numEnsaios;
-    });
-
-    // Sort chronologically then by PAC
-    return Object.values(groups).sort((a, b) => {
-      const timeDiff = a.dateObj.getTime() - b.dateObj.getTime();
-      if (timeDiff !== 0) return timeDiff;
-      return a.pac.localeCompare(b.pac);
-    });
-  }, [pacStats, selectedPacFilter, groupingType]);
-
-  // Render chronological breakdown table for all PACs
-  const renderAllPacsBreakdownSection = () => {
-    if (groupingType === 'day') {
-      return (
-        <div className="flex flex-col items-center justify-center p-8 h-64 bg-gray-50 border border-dashed border-[#e5e5e0] rounded-2xl text-center leading-normal">
-          <BarChart3 size={32} className="text-[#5A5A40]/30 mb-2" />
-          <h5 className="text-xs font-bold text-[#5A5A40] opacity-80">Tabela de Evolução</h5>
-          <span className="text-[11px] text-[#5A5A40]/60 max-w-xs mt-1">
-            Selecione um período maior que 31 dias (mais de um mês ou ano) para carregar a tabela detalhada de evolução cronológica por período.
-          </span>
-        </div>
-      );
-    }
-
-    return (
-      <div className="overflow-x-auto max-h-[280px] overflow-y-auto mt-4 pr-1 scrollbar-thin">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="text-[10px] uppercase font-bold text-[#5A5A40] opacity-50 border-b border-[#e5e5e0]">
-              <th className="pb-3">Período ({groupingType === 'month' ? 'Mês' : 'Ano'})</th>
-              <th className="pb-3">PAC</th>
-              <th className="pb-3 text-center">Ensaios Entregues</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[#f5f5f0]">
-            {allPacsBreakdownData.map((row) => (
-              <tr key={`${row.key}_${row.pac}`} className="group hover:bg-[#f5f5f0]/50 transition-colors">
-                <td className="py-3 font-medium text-xs capitalize">{row.label}</td>
-                <td className="py-3 font-medium text-xs">{row.pac}</td>
-                <td className="py-3 text-center">
-                  <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold">
-                    {row.totalEnsaios}
-                  </span>
-                </td>
-              </tr>
-            ))}
-            {allPacsBreakdownData.length === 0 && (
-              <tr>
-                <td colSpan={3} className="py-8 text-center text-xs text-[#5A5A40] opacity-60 italic">
-                  Nenhuma entrega registrada para detalhar.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    );
-  };
-
-  const renderSpecificPacChart = () => {
-    const chartData = specificPacData;
-    if (chartData.length <= 1) {
-      return (
-        <div className="flex flex-col items-center justify-center p-8 h-64 bg-gray-50 border border-dashed border-[#e5e5e0] rounded-2xl text-xs text-[#5A5A40]/60 text-center leading-normal">
-          <Clock size={32} className="text-[#5A5A40]/30 mb-2" />
-          <span>Dados insuficientes para exibição do gráfico evolutivo.</span>
-          <span className="opacity-75 mt-1">O gráfico de evolução requer entregas registradas em pelo menos 2 períodos diferentes (ex: meses ou dias distintos).</span>
-        </div>
-      );
-    }
-
-    return (
-      <div className="h-72 w-full mt-4">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={chartData} margin={{ top: 20, right: 30, left: 10, bottom: 20 }}>
-            <defs>
-              <linearGradient id="colorEnsaios" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#10b981" stopOpacity={0.2}/>
-                <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E5E5E0" />
-            <XAxis 
-              dataKey="label" 
-              tick={{ fill: '#5A5A40', fontSize: 10 }}
-              axisLine={{ stroke: '#E5E5E0' }}
-              tickLine={{ stroke: '#E5E5E0' }}
-            />
-            <YAxis tick={{ fill: '#5A5A40', fontSize: 11 }} axisLine={false} tickLine={false} />
-            <Tooltip 
-              contentStyle={{ backgroundColor: 'white', borderRadius: '16px', border: '1px solid #E5E5E0', fontSize: '12px' }}
-              labelStyle={{ fontWeight: 'bold', color: '#1a1a1a' }}
-            />
-            <Area type="monotone" dataKey="totalEnsaios" name="Ensaios Entregues" stroke="#10b981" fillOpacity={1} fill="url(#colorEnsaios)" strokeWidth={3} />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-    );
-  };
-
-  return (
-    <div className="bg-white rounded-[32px] p-8 border border-[#e5e5e0] mt-8">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#f5f5f0] pb-6 mb-6">
-        <div>
-          <div className="flex items-center gap-3">
-            <BarChart3 className="text-[#5A5A40]" size={24} />
-            <h3 className="text-xl font-display font-bold tracking-tight">Produtividade por PAC</h3>
-          </div>
-          <p className="text-xs text-[#5A5A40]/60 mt-1">
-            Total de ensaios entregues (finalizados/informados) agrupados por PAC no período selecionado.
-          </p>
-        </div>
-
-        {/* Filters specific to PAC Productivity */}
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold uppercase text-[#5A5A40] opacity-60 block">Filtrar PAC</label>
-            <select
-              className="px-3 py-2 bg-[#f5f5f0] border-none rounded-xl text-xs focus:ring-2 focus:ring-[#5A5A40]/20 focus:outline-none font-bold text-[#5A5A40]"
-              value={selectedPacFilter}
-              onChange={(e) => setSelectedPacFilter(e.target.value)}
-            >
-              <option value="all">Todos os PACs</option>
-              {allPacNames.map(pac => (
-                <option key={pac} value={pac}>{pac}</option>
-              ))}
-            </select>
-          </div>
-
-          {selectedPacFilter === 'all' && (
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold uppercase text-[#5A5A40] opacity-60 block">Ordenação</label>
-              <select
-                className="px-3 py-2 bg-[#f5f5f0] border-none rounded-xl text-xs focus:ring-2 focus:ring-[#5A5A40]/20 focus:outline-none font-bold text-[#5A5A40]"
-                value={pacSortOrder}
-                onChange={(e) => setPacSortOrder(e.target.value as any)}
-              >
-                <option value="delivered_desc">Ensaios Entregues (Maior para Menor)</option>
-                <option value="alphabetical">Ordem Alfabética</option>
-              </select>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* Table Column */}
-        <div className="overflow-x-auto">
-          {selectedPacFilter === 'all' ? (
-            <table className="w-full text-left">
-              <thead>
-                <tr className="text-[10px] uppercase font-bold text-[#5A5A40] opacity-50 border-b border-[#e5e5e0]">
-                  <th className="pb-4">PAC</th>
-                  <th className="pb-4 text-center">Ensaios Entregues</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#f5f5f0]">
-                {pacGroupedData.map((row) => (
-                  <tr key={row.pac} className="group hover:bg-[#f5f5f0]/50 transition-colors">
-                    <td className="py-4 font-medium text-sm">{row.pac}</td>
-                    <td className="py-4 text-center">
-                      <span className="px-2 py-1 bg-[#5A5A40]/10 text-[#5A5A40] rounded-lg text-xs font-bold">
-                        {row.totalEnsaios}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {pacGroupedData.length === 0 && (
-                  <tr>
-                    <td colSpan={2} className="py-8 text-center text-xs text-[#5A5A40] opacity-60 italic">
-                      Nenhum PAC cadastrado ou com entregas no período.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          ) : (
-            <table className="w-full text-left">
-              <thead>
-                <tr className="text-[10px] uppercase font-bold text-[#5A5A40] opacity-50 border-b border-[#e5e5e0]">
-                  <th className="pb-4">Período ({groupingType === 'day' ? 'Dia' : groupingType === 'month' ? 'Mês' : 'Ano'})</th>
-                  <th className="pb-4 text-center">Ensaios Entregues</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#f5f5f0]">
-                {specificPacData.map((row) => (
-                  <tr key={row.key} className="group hover:bg-[#f5f5f0]/50 transition-colors">
-                    <td className="py-4 font-medium text-sm capitalize">{row.label}</td>
-                    <td className="py-4 text-center">
-                      <span className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold">
-                        {row.totalEnsaios}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {specificPacData.length === 0 && (
-                  <tr>
-                    <td colSpan={2} className="py-8 text-center text-xs text-[#5A5A40] opacity-60 italic">
-                      Nenhuma entrega de ensaio registrada para {selectedPacFilter} no período selecionado.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Chart Column */}
-        <div className="flex flex-col justify-center">
-          <h4 className="text-xs font-bold uppercase tracking-wider text-[#5A5A40] opacity-75 mb-2">
-            {selectedPacFilter === 'all' 
-              ? (groupingType !== 'day' ? 'Detalhamento de Entregas por Período e PAC' : 'Infomativo') 
-              : `Gráfico Evolutivo: ${selectedPacFilter}`}
-          </h4>
-          {selectedPacFilter === 'all' ? renderAllPacsBreakdownSection() : renderSpecificPacChart()}
-        </div>
-      </div>
     </div>
   );
 }

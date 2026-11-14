@@ -551,6 +551,8 @@ export default function NotificationTemplatesManager({
   // Helper function to replace templates parameters
   const renderTemplateText = (text: string) => {
     if (!text) return '';
+    const dateNow = new Date();
+    const dateExtenso = dateNow.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
     return text
       .replace(/{pac_nome}/g, metrics.razaoSocial || metrics.pacName)
       .replace(/{pac_name}/g, metrics.razaoSocial || metrics.pacName)
@@ -562,7 +564,8 @@ export default function NotificationTemplatesManager({
       .replace(/{placas_nao_conformes}/g, metrics.placasNaoConformesList)
       .replace(/{motivo_detalhes}/g, metrics.enquadramentos)
       .replace(/{lotes_detalhes}/g, metrics.lotesDetalhes || '')
-      .replace(/{data_atual}/g, new Date().toLocaleDateString('pt-BR'));
+      .replace(/{data_atual}/g, dateNow.toLocaleDateString('pt-BR'))
+      .replace(/{data_atual_extenso}/g, dateExtenso);
   };
 
   // Icon preview list builder
@@ -633,14 +636,14 @@ export default function NotificationTemplatesManager({
     const sectionsHTML = oficioSections.map(s => {
       const formattedContent = renderTemplateText(s.content).replace(/\n/g, '<br/>');
       return `
-        <div class="print-avoid-break" style="display: flex; margin-bottom: 24px; font-family: sans-serif; page-break-inside: avoid; break-inside: avoid;">
+        <div class="section-item" style="display: flex; margin-bottom: 24px; font-family: sans-serif;">
           <div style="flex: 0 0 60px; text-align: center; border-right: 1px solid #e2e8f0; margin-right: 20px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 5px;">
             <div style="background-color: #f1f5f9; padding: 12px; border-radius: 12px; color: #475569; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: bold; border: 1px solid #e2e8f0;">
               ${getIconEmoji(s.icon)}
             </div>
             <div style="width: 2px; flex: 1; min-height: 20px; background-color: #f1f5f9; margin-top: 10px;"></div>
           </div>
-          <div style="flex: 1; padding: 16px 20px; background-color: #f8fafc; border-radius: 16px; border: 1px solid #f1f5f9;">
+          <div style="flex: 1; padding: 16px 20px; background-color: #f8fafc; border-radius: 16px; border: 1px solid #f1f5f9; word-break: break-word; overflow-wrap: anywhere;">
             <h4 style="margin: 0 0 8px 0; font-size: 12px; font-weight: 800; letter-spacing: 0.1em; color: #1e293b; text-transform: uppercase;">${s.title}</h4>
             <p style="margin: 0; font-size: 13px; font-weight: 400; line-height: 1.6; color: #475569;">${formattedContent}</p>
           </div>
@@ -661,9 +664,13 @@ export default function NotificationTemplatesManager({
                 display: block !important;
               }
               .no-print { display: none !important; }
-              .print-avoid-break, .target-box, .section-item { 
+              .print-avoid-break, .target-box { 
                 page-break-inside: avoid !important; 
                 break-inside: avoid !important;
+              }
+              .section-item {
+                page-break-inside: auto !important;
+                break-inside: auto !important;
               }
               .header {
                 page-break-inside: avoid !important;
